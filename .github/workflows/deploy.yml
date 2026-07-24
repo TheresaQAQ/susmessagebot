@@ -21,9 +21,11 @@ on:
       - "CONTRIBUTING.md"
       - "eval_results/**"
 
+# Do not cancel in-progress runs: the deploy job SSHs to production and must
+# finish (or roll back) instead of being interrupted by a newer push.
 concurrency:
   group: cicd-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -161,23 +163,24 @@ jobs:
 
             echo "${GHCR_READ_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
             export IMAGE="${IMAGE}"
-            docker compose pull
-            docker compose up -d --remove-orphans
-
-            echo "Waiting for container health..."
-            for i in $(seq 1 36); do
-              STATUS="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' susmessagebot 2>/dev/null || echo missing)"
-              if [ "${STATUS}" = "healthy" ]; then
-                echo "Deploy healthy with ${IMAGE}"
-                docker logout ghcr.io >/dev/null 2>&1 || true
-                exit 0
-              fi
-              if [ "${STATUS}" = "unhealthy" ] || [ "${STATUS}" = "exited" ] || [ "${STATUS}" = "dead" ]; then
-                echo "Container became ${STATUS}"
-                break
-              fi
-              sleep 5
-            done
+            if docker compose pull && docker compose up -d --remove-orphans; then
+              echo "Waiting for container health..."
+              for i in $(seq 1 36); do
+                STATUS="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' susmessagebot 2>/dev/null || echo missing)"
+                if [ "${STATUS}" = "healthy" ]; then
+                  echo "Deploy healthy with ${IMAGE}"
+                  docker logout ghcr.io >/dev/null 2>&1 || true
+                  exit 0
+                fi
+                if [ "${STATUS}" = "unhealthy" ] || [ "${STATUS}" = "exited" ] || [ "${STATUS}" = "dead" ]; then
+                  echo "Container became ${STATUS}"
+                  break
+                fi
+                sleep 5
+              done
+            else
+              echo "docker compose pull/up failed"
+            fi
 
             echo "Deploy failed; dumping logs"
             docker compose logs --tail=200 || true

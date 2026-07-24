@@ -11,6 +11,7 @@ from .config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
     SILICONFLOW_MODEL,
+    SILICONFLOW_VISION_MODEL,
 )
 from .prompt_loader import DEFAULT_PROMPT_ID, render_prompt
 from .vector_store import get_similar_examples
@@ -42,13 +43,14 @@ def _parse_verdict(content: str, prefer_last: bool = False) -> str:
     return matches[-1].group(1) if prefer_last else matches[0].group(1)
 
 
-def _should_disable_thinking() -> bool:
+def _should_disable_thinking(model: str | None = None) -> bool:
+    name = model or SILICONFLOW_MODEL
     return (
-        "Qwen3" in SILICONFLOW_MODEL
-        or "GLM-4.5" in SILICONFLOW_MODEL
-        or "GLM-4.6" in SILICONFLOW_MODEL
-        or "GLM-4.7" in SILICONFLOW_MODEL
-        or "DeepSeek-V3" in SILICONFLOW_MODEL
+        "Qwen3" in name
+        or "GLM-4.5" in name
+        or "GLM-4.6" in name
+        or "GLM-4.7" in name
+        or "DeepSeek-V3" in name
     )
 
 
@@ -137,8 +139,9 @@ def classify_image(image_bytes: bytes) -> str:
         data_url = _image_to_data_url(image_bytes)
         # No text for RAG; keep the same rules prompt with empty examples.
         system_prompt = render_prompt(PROMPT_ID, "")
+        vision_model = SILICONFLOW_VISION_MODEL or SILICONFLOW_MODEL
         create_kwargs = {
-            "model": SILICONFLOW_MODEL,
+            "model": vision_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {
@@ -161,7 +164,7 @@ def classify_image(image_bytes: bytes) -> str:
             "max_tokens": 64,
             "temperature": 0,
         }
-        if _should_disable_thinking():
+        if _should_disable_thinking(vision_model):
             create_kwargs["extra_body"] = {"enable_thinking": False}
 
         response = client.chat.completions.create(**create_kwargs)
@@ -169,7 +172,7 @@ def classify_image(image_bytes: bytes) -> str:
         logging.info(
             "classify_image prompt=%s model=%s raw=%r reasoning_tail=%r verdict=%s",
             PROMPT_ID,
-            SILICONFLOW_MODEL,
+            vision_model,
             content[:80],
             str(reasoning)[-120:],
             result,

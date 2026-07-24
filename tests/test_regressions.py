@@ -624,6 +624,8 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 tracker = StrikeTracker(threshold=3, db_path=db.name)
                 tracker.record(1, 7)
                 tracker.record(1, 7)
+                stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
+                stats.record_auto_ban(1, 7, 42)
 
                 guild = SimpleNamespace(
                     id=1,
@@ -642,7 +644,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch.object(bot_discord, "strikes", tracker),
                     patch.object(bot_discord, "add_example"),
-                    patch.object(bot_discord, "sync_example_to_github"),
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
                     patch.object(bot_discord, "increment_stat"),
                     patch.object(bot_discord, "get_stat", return_value=1),
                 ):
@@ -652,7 +654,44 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tracker.count(1, 7), 0)
                 interaction.response.defer.assert_awaited_once()
                 body = interaction.edit_original_response.await_args.kwargs["content"]
-                self.assertIn("User unbanned", body)
+                self.assertIn("Auto-ban reversed", body)
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_false_alarm_does_not_unban_unrelated_admin_ban(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.store_review_evidence(1, 99, 7, "other text", "Suspicious message")
+
+                guild = SimpleNamespace(
+                    id=1,
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    unban=AsyncMock(),
+                )
+                interaction = self._admin_interaction(guild, content="📝 Content:\nother text")
+                button = bot_discord.HITLFalseAlarmButton(1, 7, 99, 9)
+
+                with (
+                    patch.object(bot_discord, "strikes", StrikeTracker(db_path=db.name)),
+                    patch.object(bot_discord, "add_example"),
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "get_stat", return_value=1),
+                ):
+                    await button.callback(interaction)
+
+                guild.unban.assert_not_awaited()
+                body = interaction.edit_original_response.await_args.kwargs["content"]
+                self.assertIn("No auto-ban to reverse", body)
         finally:
             stats.DB_PATH = old_db_path
 
@@ -662,6 +701,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.NamedTemporaryFile(suffix=".db") as db:
                 stats.DB_PATH = db.name
                 stats.init_db()
+                stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
 
                 guild = SimpleNamespace(
                     owner_id=10,
@@ -677,11 +717,10 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 button = bot_discord.HITLBanButton(1, 7, 42, 9)
 
                 with (
-                    patch.object(bot_discord, "add_example"),
                     patch.object(
                         bot_discord,
-                        "sync_example_to_github",
-                        side_effect=RuntimeError("github down"),
+                        "add_example",
+                        side_effect=RuntimeError("chroma down"),
                     ),
                     patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
                 ):
@@ -695,7 +734,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 interaction2 = self._admin_interaction(guild)
                 with (
                     patch.object(bot_discord, "add_example") as add_example,
-                    patch.object(bot_discord, "sync_example_to_github"),
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
                     patch.object(bot_discord, "increment_stat"),
                     patch.object(bot_discord, "get_stat", return_value=1),
                     patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban2,
@@ -707,6 +746,54 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stats.get_review_decision(1, 42, 7), "ban")
         finally:
             stats.DB_PATH = old_db_path
+
+    async def test_review_uses_persisted_full_evidence_not_preview(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                full = "A" * 2000
+                stats.store_review_evidence(1, 42, 7, full, "Suspicious message")
+
+                guild = SimpleNamespace(
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    get_channel=MagicMock(return_value=None),
+                )
+                interaction = self._admin_interaction(
+                    guild,
+                    content="📝 Content:\n" + full[:1500] + "...",
+                )
+                button = bot_discord.HITLBanButton(1, 7, 42, 9)
+
+                with (
+                    patch.object(bot_discord, "add_example") as add_example,
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "get_stat", return_value=1),
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()),
+                ):
+                    await button.callback(interaction)
+
+                add_example.assert_called_once_with(full, "BAN")
+        finally:
+            stats.DB_PATH = old_db_path
+
+    def test_image_placeholder_is_not_trained(self):
+        with (
+            patch.object(bot_discord, "add_example") as add_example,
+            patch.object(bot_discord, "sync_example_to_github") as sync,
+        ):
+            bot_discord._record_training_example("[image]", "BAN")
+
+        add_example.assert_not_called()
+        sync.assert_not_called()
 
 
 class StrikePersistenceTests(unittest.TestCase):

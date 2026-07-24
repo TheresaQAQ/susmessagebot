@@ -204,10 +204,15 @@ def classify_with_retry(text: str, retries: int = 5) -> str:
     from susmessagebot.moderator import classify_message
 
     delay = 5
+    last_error: Exception | None = None
     for attempt in range(retries):
         try:
-            return classify_message(text)
+            verdict = classify_message(text)
+            if verdict == "REVIEW":
+                raise RuntimeError("classifier returned REVIEW")
+            return verdict
         except Exception as e:
+            last_error = e
             msg = str(e)
             logging.warning("classify failed attempt=%s err=%s", attempt + 1, e)
             if "free-models-per-day" in msg or ("Rate limit exceeded" in msg and "per-day" in msg):
@@ -218,7 +223,7 @@ def classify_with_retry(text: str, retries: int = 5) -> str:
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 60)
-    raise RuntimeError("unreachable")
+    raise RuntimeError("unreachable") from last_error
 
 
 def summarize(rows: list[dict], prompt_id: str, run: int, model: str) -> None:

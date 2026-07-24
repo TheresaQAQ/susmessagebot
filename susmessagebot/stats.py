@@ -21,6 +21,8 @@ def init_db():
     conn.close()
     init_groups_table()
     init_review_decisions_table()
+    init_review_evidence_table()
+    init_auto_ban_table()
     init_strikes_table()
 
 
@@ -128,6 +130,159 @@ def release_review_decision(
                 WHERE review_key = ? AND decision = ? AND decided_by = ?
                 """,
                 (key, decision, decided_by),
+            )
+            deleted = cursor.rowcount > 0
+            conn.execute("COMMIT")
+            return deleted
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def init_review_evidence_table():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS review_evidence (
+            review_key TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+
+def store_review_evidence(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    content: str,
+    reason: str = "",
+) -> None:
+    key = review_key(guild_id, message_id, user_id)
+    now = time.time()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO review_evidence (review_key, content, reason, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(review_key) DO UPDATE SET
+            content = excluded.content,
+            reason = excluded.reason,
+            created_at = excluded.created_at
+        """,
+        (key, content, reason, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_review_evidence(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+) -> str | None:
+    key = review_key(guild_id, message_id, user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT content FROM review_evidence WHERE review_key = ?",
+        (key,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_review_reason(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+) -> str | None:
+    key = review_key(guild_id, message_id, user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT reason FROM review_evidence WHERE review_key = ?",
+        (key,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def init_auto_ban_table():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS auto_bans (
+            scope_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (scope_id, user_id)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+
+def record_auto_ban(scope_id: int, user_id: int, message_id: int) -> None:
+    """Remember which message triggered an automatic ban for false-alarm reversal."""
+    now = time.time()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO auto_bans (scope_id, user_id, message_id, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(scope_id, user_id) DO UPDATE SET
+            message_id = excluded.message_id,
+            created_at = excluded.created_at
+        """,
+        (scope_id, user_id, message_id, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_auto_ban(scope_id: int, user_id: int) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM auto_bans WHERE scope_id = ? AND user_id = ?",
+        (scope_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def take_reversible_auto_ban(
+    scope_id: int,
+    user_id: int,
+    message_id: int,
+) -> bool:
+    """
+    Consume an auto-ban record if it was triggered by this message.
+
+    Returns True only when a false-alarm for this message should unban.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.execute(
+                """
+                DELETE FROM auto_bans
+                WHERE scope_id = ? AND user_id = ? AND message_id = ?
+                """,
+                (scope_id, user_id, message_id),
             )
             deleted = cursor.rowcount > 0
             conn.execute("COMMIT")

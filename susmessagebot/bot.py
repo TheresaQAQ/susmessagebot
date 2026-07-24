@@ -28,6 +28,12 @@ from .stats import (
     get_total_members,
     claim_review_decision,
     release_review_decision,
+    store_review_evidence,
+    get_review_evidence,
+    get_review_reason,
+    record_auto_ban,
+    clear_auto_ban,
+    take_reversible_auto_ban,
 )
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -216,9 +222,8 @@ async def on_message(message: discord.Message):
         is_admin = message.author.guild_permissions.administrator
 
         if is_admin:
-            text = reported_msg.content or "[image]"
-            add_example(text, "BAN")
-            sync_example_to_github(text, "BAN")
+            text = _message_text(reported_msg)
+            _record_training_example(text, "BAN")
             increment_stat('false_negatives')
             FALSE_NEGATIVES.set(get_stat('false_negatives'))
             try:
@@ -242,6 +247,13 @@ async def on_message(message: discord.Message):
                 f"🚨 Scam report by {message.author} in **#{message.channel.name}**\n\n"
                 f"👤 Reported user: {reported_msg.author} (`{reported_msg.author.id}`)\n\n"
                 f"📝 Content:\n{preview}"
+            )
+            store_review_evidence(
+                message.guild.id,
+                reported_msg.id,
+                reported_msg.author.id,
+                text,
+                "User report",
             )
             notified = 0
             for admin in await _admin_members(message.guild):
@@ -377,11 +389,15 @@ async def _execute_ban(
     guild: discord.Guild,
     user: discord.abc.User,
     reason: str,
+    preserve_auto_ban_record: bool = False,
 ) -> None:
     """DM ban notice first (ban removes mutual servers), then ban and clear strikes."""
     await _dm_user(user, ban_notice_text(APPEAL_DISCORD_USER_ID))
     await guild.ban(discord.Object(id=user.id), reason=reason)
     strikes.clear(guild.id, user.id)
+    if not preserve_auto_ban_record:
+        # Admin/manual bans must not be reversible by an unrelated false alarm.
+        clear_auto_ban(guild.id, user.id)
 
 
 def _message_text(message: discord.Message) -> str:
@@ -391,6 +407,25 @@ def _message_text(message: discord.Message) -> str:
     if message.attachments:
         return "[image]"
     return "[empty]"
+
+
+def _trainable_text(text: str) -> str | None:
+    """Return text suitable for RAG/GitHub training, or None for placeholders."""
+    cleaned = (text or "").strip()
+    if not cleaned or cleaned in {"[image]", "[empty]"}:
+        return None
+    return cleaned
+
+
+def _record_training_example(text: str, label: str) -> None:
+    """Persist a local training example and best-effort sync it to GitHub."""
+    trainable = _trainable_text(text)
+    if not trainable:
+        logging.info("Skipping text training for non-textual evidence (%r)", text)
+        return
+    add_example(trainable, label)
+    if not sync_example_to_github(trainable, label):
+        logging.warning("GitHub sync failed for %s example; local training kept", label)
 
 
 def _is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -450,6 +485,7 @@ async def _dm_admins_review(
     status: str | None = None,
 ) -> int:
     """Send full content + Ban/False Alarm buttons to each admin via DM. Returns how many DMs succeeded."""
+    store_review_evidence(guild.id, message_id, author.id, content, reason)
     preview = content if len(content) <= 1500 else content[:1500] + "..."
     if status is None:
         status = (
@@ -576,14 +612,20 @@ async def _ban_user(
             threshold = strikes.threshold
             window_min = strikes.window_seconds // 60
             logging.info(f"Auto-ban after {threshold} reviewed triggers: user {author.id}")
-            add_example(content, "BAN")
-            sync_example_to_github(content, "BAN")
+            _record_training_example(content, "BAN")
             increment_stat('bans_confirmed')
             BANS_CONFIRMED.set(get_stat('bans_confirmed'))
+            record_auto_ban(guild.id, author.id, message_id)
             try:
-                await _execute_ban(guild=guild, user=author, reason=f"Auto-ban: {reason}")
+                await _execute_ban(
+                    guild=guild,
+                    user=author,
+                    reason=f"Auto-ban: {reason}",
+                    preserve_auto_ban_record=True,
+                )
             except Exception as e:
                 logging.error(f"Error auto-banning user: {e}")
+                clear_auto_ban(guild.id, author.id)
                 return
             await _dm_admins_text(
                 guild,
@@ -688,7 +730,16 @@ async def _require_interaction_admin(
     return guild
 
 
-def _interaction_review_text(interaction: discord.Interaction) -> str:
+def _interaction_review_text(
+    interaction: discord.Interaction,
+    *,
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+) -> str:
+    stored = get_review_evidence(guild_id, message_id, user_id)
+    if stored:
+        return stored
     message = interaction.message
     content = (message.content if message else "") or ""
     marker = "📝 Content:\n"
@@ -738,7 +789,12 @@ class HITLBanButton(
         guild = await _require_interaction_admin(interaction, self.guild_id)
         if not guild:
             return
-        text = _interaction_review_text(interaction)
+        text = _interaction_review_text(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+        )
         if not text:
             await interaction.response.send_message(
                 "Review context is unavailable.",
@@ -755,8 +811,7 @@ class HITLBanButton(
             return
         await interaction.response.defer()
         try:
-            add_example(text, "BAN")
-            sync_example_to_github(text, "BAN")
+            _record_training_example(text, "BAN")
             increment_stat('bans_confirmed')
             BANS_CONFIRMED.set(get_stat('bans_confirmed'))
         except Exception as e:
@@ -838,7 +893,12 @@ class HITLFalseAlarmButton(
         guild = await _require_interaction_admin(interaction, self.guild_id)
         if not guild:
             return
-        text = _interaction_review_text(interaction)
+        text = _interaction_review_text(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+        )
         if not text:
             await interaction.response.send_message(
                 "Review context is unavailable.",
@@ -855,10 +915,14 @@ class HITLFalseAlarmButton(
             return
         await interaction.response.defer()
         try:
-            add_example(text, "SAFE")
-            sync_example_to_github(text, "SAFE")
-            increment_stat('false_positives')
-            FALSE_POSITIVES.set(get_stat('false_positives'))
+            _record_training_example(text, "SAFE")
+            review_reason = (
+                get_review_reason(self.guild_id, self.message_id, self.user_id) or ""
+            )
+            # Classifier outages are not false positives.
+            if "unavailable" not in review_reason.lower():
+                increment_stat('false_positives')
+                FALSE_POSITIVES.set(get_stat('false_positives'))
             strikes.clear(self.guild_id, self.user_id)
         except Exception as e:
             logging.error(f"Error recording false-alarm decision: {e}")
@@ -875,22 +939,24 @@ class HITLFalseAlarmButton(
             )
             return
 
-        unban_note = "No active ban to reverse."
-        try:
-            await guild.unban(
-                discord.Object(id=self.user_id),
-                reason="False alarm confirmed",
-            )
-            unban_note = "User unbanned."
-        except discord.NotFound:
-            pass
-        except Exception as e:
-            logging.warning(
-                "Could not unban user %s after false alarm: %s",
-                self.user_id,
-                e,
-            )
-            unban_note = "Could not unban automatically."
+        unban_note = "No auto-ban to reverse."
+        if take_reversible_auto_ban(self.guild_id, self.user_id, self.message_id):
+            try:
+                await guild.unban(
+                    discord.Object(id=self.user_id),
+                    reason="False alarm confirmed",
+                )
+                unban_note = "Auto-ban reversed."
+            except discord.NotFound:
+                unban_note = "Auto-ban record cleared."
+            except Exception as e:
+                logging.warning(
+                    "Could not unban user %s after false alarm: %s",
+                    self.user_id,
+                    e,
+                )
+                record_auto_ban(self.guild_id, self.user_id, self.message_id)
+                unban_note = "Could not unban automatically."
 
         await _edit_review_message(
             interaction,
@@ -928,9 +994,8 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
     is_admin = interaction.user.guild_permissions.administrator
 
     if is_admin:
-        text = message.content or "[image]"
-        add_example(text, "BAN")
-        sync_example_to_github(text, "BAN")
+        text = _message_text(message)
+        _record_training_example(text, "BAN")
         increment_stat('false_negatives')
         FALSE_NEGATIVES.set(get_stat('false_negatives'))
         try:
@@ -947,6 +1012,13 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
     else:
         text = _message_text(message)
         images = await _snapshot_images(message)
+        store_review_evidence(
+            interaction.guild.id,
+            message.id,
+            message.author.id,
+            text,
+            "User report",
+        )
         preview = text if len(text) <= 1500 else text[:1500] + "..."
         body = (
             f"🚨 Scam report by {interaction.user} in **#{message.channel.name}**\n\n"
@@ -1017,7 +1089,12 @@ class ReportConfirmButton(
         guild = await _require_interaction_admin(interaction, self.guild_id)
         if not guild:
             return
-        text = _interaction_review_text(interaction)
+        text = _interaction_review_text(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+        )
         if not text:
             await interaction.response.send_message(
                 "Review context is unavailable.",
@@ -1034,8 +1111,7 @@ class ReportConfirmButton(
             return
         await interaction.response.defer()
         try:
-            add_example(text, "BAN")
-            sync_example_to_github(text, "BAN")
+            _record_training_example(text, "BAN")
             increment_stat('false_negatives')
             FALSE_NEGATIVES.set(get_stat('false_negatives'))
         except Exception as e:

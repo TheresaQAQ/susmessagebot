@@ -18,6 +18,11 @@ SILICONFLOW_MODEL = os.getenv(
     "SILICONFLOW_MODEL",
     os.getenv("OPENROUTER_MODEL", "Qwen/Qwen3-8B"),
 )
+# Vision-capable model for image moderation (text-only defaults cannot see images).
+SILICONFLOW_VISION_MODEL = os.getenv(
+    "SILICONFLOW_VISION_MODEL",
+    "Qwen/Qwen2.5-VL-7B-Instruct",
+)
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 # Discord user ID shown in ban DMs for unban appeals (add this user to send feedback).
