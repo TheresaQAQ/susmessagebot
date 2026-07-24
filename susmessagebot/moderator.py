@@ -37,7 +37,8 @@ def _parse_verdict(content: str, prefer_last: bool = False) -> str:
         return decided[-1].group(1)
     matches = list(re.finditer(r"\b(BAN|SAFE)\b", text))
     if not matches:
-        return "SAFE"
+        # Unparseable model output is a classification failure, not a SAFE pass.
+        return "REVIEW"
     return matches[-1].group(1) if prefer_last else matches[0].group(1)
 
 
@@ -60,8 +61,10 @@ def _verdict_from_response(response) -> tuple[str, str, str]:
         or ""
     )
     result = _parse_verdict(content)
-    if not content.strip() and reasoning:
-        result = _parse_verdict(reasoning, prefer_last=True)
+    if result == "REVIEW" and reasoning:
+        reasoned = _parse_verdict(reasoning, prefer_last=True)
+        if reasoned != "REVIEW":
+            result = reasoned
     return result, content, reasoning
 
 

@@ -105,7 +105,8 @@ Respond with exactly one word: SAFE or BAN"""
         if text in {"SAFE", "BAN"}:
             return text
         match = re.search(r"\b(BAN|SAFE)\b", (content or reasoning).upper())
-        return match.group(1) if match else "SAFE"
+        # Unparseable model output is a classification failure, not a SAFE pass.
+        return match.group(1) if match else "REVIEW"
     except Exception as e:
         logging.error(f"URL LLM classification error: {e}")
         return "REVIEW"
@@ -115,12 +116,14 @@ def analyze_urls(text: str) -> str:
     """
     Extract and analyze all URLs in a message.
 
-    Returns "BAN" if any URL is suspicious, "SAFE" otherwise.
+    Returns "BAN" if any URL is suspicious, "REVIEW" if classification failed
+    for at least one URL without a later BAN, otherwise "SAFE".
     """
     urls = _extract_urls(text)
     if not urls:
         return "SAFE"
 
+    saw_review = False
     for url in urls:
         # Never fetch user-controlled URLs from the bot host. Following redirects
         # here would allow messages to probe internal or cloud metadata services.
@@ -142,6 +145,7 @@ def analyze_urls(text: str) -> str:
         if result == "BAN":
             return "BAN"
         if result == "REVIEW":
-            return "REVIEW"
+            # Keep scanning: a later blocklisted/BAN URL must still win.
+            saw_review = True
 
-    return "SAFE"
+    return "REVIEW" if saw_review else "SAFE"

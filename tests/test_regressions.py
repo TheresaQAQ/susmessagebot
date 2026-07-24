@@ -58,6 +58,36 @@ class ClassifierFailureRegressionTests(unittest.TestCase):
     def test_invalid_image_requests_manual_review(self):
         self.assertEqual(moderator.classify_image(b"not an image"), "REVIEW")
 
+    def test_unparseable_verdict_requests_manual_review(self):
+        self.assertEqual(moderator._parse_verdict(""), "REVIEW")
+        self.assertEqual(moderator._parse_verdict("I cannot decide"), "REVIEW")
+
+    @patch(
+        "susmessagebot.url_moderator.client.chat.completions.create",
+    )
+    def test_unparseable_url_verdict_requests_manual_review(self, create):
+        create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="maybe later", reasoning=None)
+                )
+            ]
+        )
+        self.assertEqual(
+            url_moderator._classify_url_with_llm("https://unknown.example"),
+            "REVIEW",
+        )
+
+    @patch.object(url_moderator, "_blocklist", {"evil.example"})
+    @patch.object(url_moderator, "_classify_url_with_llm", return_value="REVIEW")
+    def test_url_review_continues_to_later_blocklist_ban(self, classify_url):
+        result = url_moderator.analyze_urls(
+            "see https://unknown.example/a and https://evil.example/b"
+        )
+
+        self.assertEqual(result, "BAN")
+        classify_url.assert_called_once_with("https://unknown.example/a")
+
 
 class SeedDataRegressionTests(unittest.TestCase):
     def test_placeholder_messages_are_not_ban_training_examples(self):
