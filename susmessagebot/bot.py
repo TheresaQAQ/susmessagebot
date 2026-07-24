@@ -364,11 +364,17 @@ async def _dm_admins_review(
     content: str,
     reason: str,
     images: list[tuple[str, bytes]] | None = None,
+    removed: bool = True,
 ) -> int:
     """Send full content + Ban/False Alarm buttons to each admin via DM. Returns how many DMs succeeded."""
     preview = content if len(content) <= 1500 else content[:1500] + "..."
+    status = (
+        "Suspicious content removed"
+        if removed
+        else "Suspicious content flagged, but automatic removal failed"
+    )
     body = (
-        f"⚠️ Suspicious content removed in **#{channel_name}** ({guild.name})\n\n"
+        f"⚠️ {status} in **#{channel_name}** ({guild.name})\n\n"
         f"👤 User: {author} (`{author.id}`)\n\n"
         f"📝 Content:\n{preview}"
     )
@@ -409,7 +415,9 @@ async def _ban_user(
         await message.delete()
     except Exception as e:
         logging.error(f"Error deleting message: {e}")
-        return
+        deleted = False
+    else:
+        deleted = True
 
     if not guild:
         return
@@ -421,6 +429,7 @@ async def _ban_user(
         content=content,
         reason=reason,
         images=images,
+        removed=deleted,
     )
     if notified == 0:
         logging.error(
@@ -451,8 +460,16 @@ async def _ban_user(
             )
             return
 
-    logging.info(f"Message removed (pending admin ban) for user {author.id}")
-    await _dm_user(author, remove_notice_text(guild.id, author.id))
+    if deleted:
+        logging.info(f"Message removed (pending admin ban) for user {author.id}")
+        await _dm_user(author, remove_notice_text(guild.id, author.id))
+    else:
+        logging.info(f"Message flagged but not removed (pending admin review) for user {author.id}")
+        await _dm_user(
+            author,
+            "⚠️ Your message was flagged for moderation review, but I could not "
+            "remove it automatically. Server admins have been notified.",
+        )
 
 
 async def _require_interaction_admin(

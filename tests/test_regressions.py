@@ -304,6 +304,43 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_failure_still_notifies_admins_and_user(self):
+        author = SimpleNamespace(id=7)
+        guild = SimpleNamespace(id=1, name="Test Guild")
+        channel = SimpleNamespace(name="general")
+        message = SimpleNamespace(
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="scam",
+            attachments=[],
+            delete=AsyncMock(side_effect=RuntimeError("missing permissions")),
+        )
+        dm_admins = AsyncMock(return_value=1)
+        dm_user = AsyncMock()
+
+        with (
+            patch.object(bot_discord, "strikes", StrikeTracker(threshold=3)),
+            patch.object(bot_discord, "increment_stat"),
+            patch.object(bot_discord, "get_stat", return_value=0),
+            patch.object(bot_discord, "_dm_admins_review", dm_admins),
+            patch.object(bot_discord, "_dm_user", dm_user),
+        ):
+            await bot_discord._ban_user(message, reason="test")
+
+        message.delete.assert_awaited_once()
+        dm_admins.assert_awaited_once_with(
+            guild,
+            channel_name="general",
+            author=author,
+            content="scam",
+            reason="test",
+            images=[],
+            removed=False,
+        )
+        dm_user.assert_awaited_once()
+        self.assertIn("could not remove it automatically", dm_user.await_args.args[1])
+
     async def test_discord_does_not_autoban_when_no_admin_can_review(self):
         execute_ban = AsyncMock()
         author = SimpleNamespace(id=7)
