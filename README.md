@@ -2,10 +2,6 @@
 
 An AI-powered Discord moderation bot that detects and bans scammers in real time using semantic understanding, RAG, and a Human-in-the-Loop feedback system.
 
-## Branding
-
-This is proudly a @commonertech product.
-
 ## Why
 
 Singaporeans lost a record S$1.1 billion to scams in 2024 and S$913.1 million in 2025 (Singapore Police Force). Community platforms are frequently exploited by scammers, while existing moderation tools rely on static keyword rules that are easily bypassed with character substitution and deliberate typos. This bot was built to fight back using semantic understanding instead of keyword matching.
@@ -68,10 +64,6 @@ If the bot misses a scam (false negative), it can be manually reported:
 
 False negatives are tracked separately in the monitoring dashboard.
 
-## Live Monitoring Dashboard
-
-[susmessagebot.commonertech.dev/dashboard](https://susmessagebot.commonertech.dev/dashboard)
-
 ## Additional Details:
 
 As of date of creation (30 March 2026), I have yet to provision an Oracle Cloud VPS Instance due to consistently meeting "Host Out of Capacity" errors. This is expected as it's understandable that everyone would want to sign up for their generous free tier.
@@ -103,7 +95,7 @@ I seek your kind understanding for any teething issues.
   - `SILICONFLOW_MODEL` — optional, defaults to `Qwen/Qwen2.5-7B-Instruct`
   - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python -m susmessagebot.bot`
   - `GITHUB_TOKEN` — GitHub Personal Access Token with `Contents: Read and Write` permission
-  - `GITHUB_REPO` — your forked repository (e.g. `yourusername/susmessagebot`)
+  - `GITHUB_REPO` — this repository (e.g. `TheresaQAQ/susmessagebot`)
   - `GITHUB_BRANCH` — branch to sync examples to (e.g. `main`)
 
 ## Model Used:
@@ -182,14 +174,3 @@ python -m susmessagebot.bot
 
 Health: `http://127.0.0.1:8001/health` (200 only after Discord gateway ready)  
 Metrics: `http://127.0.0.1:8000/metrics`
-
-## Sponsorship
-
-Running this bot at scale requires paid infrastructure. If this project has been useful to you and you'd like to help cover hosting costs or support further development, consider sponsoring:
-
-- ⭐ Star the repo to show support
-- ❤️ [GitHub Sponsors](https://github.com/sponsors/0mgABear)
-- 📧 Contact: hello@commonertech.dev
-- ☕ [Ko-fi](https://ko-fi.com/commonertech)
-
-Every contribution helps keep the bot running and the project maintained. Thank you! 🙏
