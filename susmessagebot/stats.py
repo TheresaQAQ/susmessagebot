@@ -285,12 +285,13 @@ def clear_auto_ban(scope_id: int, user_id: int) -> None:
 def take_reversible_auto_ban(
     scope_id: int,
     user_id: int,
-    message_id: int,
-) -> bool:
+) -> int | None:
     """
-    Consume an auto-ban record if it was triggered by this message.
+    Consume an auto-ban record for this user.
 
-    Returns True only when a false-alarm for this message should unban.
+    Any false alarm among the strikes that led to an automatic ban invalidates
+    that ban. Returns the triggering message ID so a failed unban can restore
+    the record for retry.
     """
     conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
     try:
@@ -299,14 +300,24 @@ def take_reversible_auto_ban(
         try:
             cursor.execute(
                 """
-                DELETE FROM auto_bans
-                WHERE scope_id = ? AND user_id = ? AND message_id = ?
+                SELECT message_id FROM auto_bans
+                WHERE scope_id = ? AND user_id = ?
                 """,
-                (scope_id, user_id, message_id),
+                (scope_id, user_id),
             )
-            deleted = cursor.rowcount > 0
+            row = cursor.fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return None
+            cursor.execute(
+                """
+                DELETE FROM auto_bans
+                WHERE scope_id = ? AND user_id = ?
+                """,
+                (scope_id, user_id),
+            )
             conn.execute("COMMIT")
-            return deleted
+            return int(row[0])
         except Exception:
             conn.execute("ROLLBACK")
             raise

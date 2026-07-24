@@ -104,7 +104,7 @@ I seek your kind understanding for any teething issues.
   - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python -m susmessagebot.bot`
   - `GITHUB_TOKEN` — GitHub Personal Access Token with `Contents: Read and Write` permission
   - `GITHUB_REPO` — your forked repository (e.g. `yourusername/susmessagebot`)
-  - `GITHUB_BRANCH` — branch to sync examples to (e.g. `groq-approach`)
+  - `GITHUB_BRANCH` — branch to sync examples to (e.g. `main`)
 
 ## Model Used:
 
@@ -112,7 +112,7 @@ I seek your kind understanding for any teething issues.
 
 ## CI/CD (Discord on VPS + Docker)
 
-Production path for `groq-approach`:
+Production path for `main`:
 
 1. GitHub Actions runs unit tests on every PR / push.
 2. On push, Actions builds `ghcr.io/<owner>/susmessagebot:<git-sha>` (CPU PyTorch wheel; no CUDA) and pushes to GHCR.
@@ -120,7 +120,7 @@ Production path for `groq-approach`:
 4. The VPS pulls that exact image and restarts Docker Compose.
 5. Deploy waits until `http://127.0.0.1:8001/health` reports Discord readiness; on failure it rolls back to the previous image.
 
-Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`, …) stay on the VPS in `.env` and are **not** stored as GitHub Actions secrets.
+Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`, …) stay on the VPS in `/opt/susmessagebot-secrets/.env` and are **not** stored as GitHub Actions secrets. The bot's secrets are isolated from FeedLink.
 
 ### GitHub Actions secrets
 
@@ -136,41 +136,39 @@ Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`,
 
 ```bash
 # Install Docker Engine + Compose plugin, then:
-mkdir -p ~/susmessagebot/data
-cd ~/susmessagebot
+sudo mkdir -p /opt/susmessagebot-secrets
+sudo touch /opt/susmessagebot-secrets/.env
+sudo chmod 700 /opt/susmessagebot-secrets
+sudo chmod 600 /opt/susmessagebot-secrets/.env
 
-# Create .env directly on the VPS. At minimum, set:
+# Edit .env directly on the VPS. At minimum, set:
 # DISCORD_BOT_TOKEN, SILICONFLOW_API_KEY, SILICONFLOW_MODEL,
 # GITHUB_TOKEN, GITHUB_REPO, and GITHUB_BRANCH.
-touch .env
-chmod 600 .env
-# edit .env
-
-# Migrate legacy host paths if you previously ran outside Docker:
-#   [ -f stats.db ] && mv stats.db data/stats.db
-#   [ -d chroma_db ] && mv chroma_db data/chroma_db
+sudo nano /opt/susmessagebot-secrets/.env
 
 # Stop the old systemd unit so the Discord token is not used twice:
 #   sudo systemctl stop susmessagebot
 #   sudo systemctl disable susmessagebot
 
-# Push to groq-approach (or manually run the workflow). Actions uploads
+# Push to main (or manually run the workflow). Actions uploads
 # compose.yaml, pulls the image, and starts the service.
 ```
 
-Persistent runtime data lives in `~/susmessagebot/data/` (`stats.db`, `chroma_db/`). Back it up before risky changes:
+The runtime Compose file is installed at `/opt/susmessagebot/compose.yaml`. Persistent runtime data lives in the independent Docker volume `susmessagebot_data` (`/var/lib/docker/volumes/susmessagebot_data/_data`) and does not share FeedLink volumes. Back it up before risky changes:
 
 ```bash
-tar -czf "susmessagebot-data-$(date +%F).tar.gz" -C ~/susmessagebot data
+sudo mkdir -p /var/backups/susmessagebot
+sudo tar -czf "/var/backups/susmessagebot/data-$(date +%F).tar.gz" \
+  -C /var/lib/docker/volumes/susmessagebot_data/_data .
 ```
 
 ### Manual rollback
 
 ```bash
-cd ~/susmessagebot
-export IMAGE=ghcr.io/<owner>/susmessagebot:<previous-sha>
-docker compose pull
-docker compose up -d
+sudo env IMAGE=ghcr.io/<owner>/susmessagebot:<previous-sha> \
+  docker compose -p susmessagebot -f /opt/susmessagebot/compose.yaml pull
+sudo env IMAGE=ghcr.io/<owner>/susmessagebot:<previous-sha> \
+  docker compose -p susmessagebot -f /opt/susmessagebot/compose.yaml up -d
 ```
 
 ### Local Discord run (without Docker)

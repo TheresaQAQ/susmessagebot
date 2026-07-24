@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import time
 import unittest
@@ -411,6 +412,28 @@ class DiscordHealthRegressionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bot_discord._bot_ready = False
 
+    async def test_blocklist_is_refreshed_periodically(self):
+        sleep_calls = 0
+
+        async def stop_after_one_refresh(_delay):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls > 1:
+                raise asyncio.CancelledError
+
+        with (
+            patch.object(bot_discord, "load_blocklist") as refresh,
+            patch.object(
+                bot_discord.asyncio,
+                "sleep",
+                side_effect=stop_after_one_refresh,
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await bot_discord._refresh_blocklist_periodically()
+
+        refresh.assert_called_once_with()
+
 
 class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_reported_message_is_handled(self):
@@ -429,6 +452,76 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
         await bot_discord.on_message(message)
 
         channel.send.assert_awaited_once()
+
+    async def test_failed_admin_mention_enforcement_is_not_recorded(self):
+        reported = SimpleNamespace(
+            id=99,
+            author=SimpleNamespace(id=7),
+            content="scam",
+            attachments=[],
+            delete=AsyncMock(),
+        )
+        channel = SimpleNamespace(
+            fetch_message=AsyncMock(return_value=reported),
+            send=AsyncMock(),
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(
+                bot=False,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            guild=SimpleNamespace(id=1),
+            channel=channel,
+            mentions=[bot_discord.client.user],
+            reference=SimpleNamespace(message_id=99),
+        )
+
+        with (
+            patch.object(
+                bot_discord,
+                "_execute_ban",
+                AsyncMock(side_effect=RuntimeError("discord down")),
+            ),
+            patch.object(bot_discord, "_record_admin_report_outcome") as record,
+        ):
+            await bot_discord.on_message(message)
+
+        record.assert_not_called()
+        channel.send.assert_awaited_once()
+        self.assertIn("Could not ban", channel.send.await_args.args[0])
+
+    async def test_failed_admin_context_report_is_not_recorded(self):
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            guild=SimpleNamespace(id=1),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(id=7),
+            content="scam",
+            attachments=[],
+            delete=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                bot_discord,
+                "_execute_ban",
+                AsyncMock(side_effect=RuntimeError("discord down")),
+            ),
+            patch.object(bot_discord, "_record_admin_report_outcome") as record,
+        ):
+            await bot_discord._handle_report(interaction, message)
+
+        record.assert_not_called()
+        interaction.followup.send.assert_awaited_once()
+        self.assertIn(
+            "Could not ban",
+            interaction.followup.send.await_args.args[0],
+        )
 
     async def test_admin_lookup_chunks_an_incomplete_member_cache(self):
         admin = SimpleNamespace(
@@ -669,7 +762,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
         finally:
             stats.DB_PATH = old_db_path
 
-    async def test_false_alarm_unbans_auto_banned_user(self):
+    async def test_false_alarm_on_prior_strike_unbans_auto_banned_user(self):
         old_db_path = stats.DB_PATH
         try:
             with tempfile.NamedTemporaryFile(suffix=".db") as db:
@@ -679,7 +772,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 tracker.record(1, 7)
                 tracker.record(1, 7)
                 stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
-                stats.record_auto_ban(1, 7, 42)
+                stats.record_auto_ban(1, 7, 44)
 
                 guild = SimpleNamespace(
                     id=1,
@@ -955,6 +1048,20 @@ class ConfigDefaultTests(unittest.TestCase):
         self.assertIn('"Qwen/Qwen2.5-7B-Instruct"', config_src)
         self.assertIn("SILICONFLOW_MODEL=Qwen/Qwen2.5-7B-Instruct", env_example)
         self.assertIn("defaults to `Qwen/Qwen2.5-7B-Instruct`", readme)
+
+
+class DeployWorkflowTests(unittest.TestCase):
+    def test_rollback_waits_for_previous_image_to_be_healthy(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            'wait_for_healthy "${PREVIOUS_IMAGE}" "Rollback"',
+            workflow,
+        )
+        self.assertNotIn("compose up -d --remove-orphans || true", workflow)
 
 
 class ThinkingFlagTests(unittest.TestCase):

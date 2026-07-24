@@ -27,4 +27,4 @@ What actually happened.
 
 - OS:
 - Python version:
-- Branch (main/groq-approach):
+- Branch (main):

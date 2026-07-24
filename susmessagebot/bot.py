@@ -49,6 +49,8 @@ intents.members = True
 
 # Set True after Discord gateway ready; /health returns 503 until then.
 _bot_ready = False
+_BLOCKLIST_REFRESH_SECONDS = 6 * 60 * 60
+_blocklist_refresh_task: asyncio.Task | None = None
 
 
 class SusMessageBot(discord.Client):
@@ -131,10 +133,32 @@ def _refresh_guild_metrics() -> None:
     MEMBERS_PROTECTED.set(get_total_members())
 
 
+async def _refresh_blocklist_periodically() -> None:
+    """Refresh the malware blocklist while the bot process remains alive."""
+    while True:
+        await asyncio.sleep(_BLOCKLIST_REFRESH_SECONDS)
+        try:
+            await asyncio.to_thread(load_blocklist)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.error(f"Unexpected blocklist refresh failure: {e}")
+
+
+def _ensure_blocklist_refresh_task() -> None:
+    global _blocklist_refresh_task
+    if _blocklist_refresh_task is None or _blocklist_refresh_task.done():
+        _blocklist_refresh_task = asyncio.create_task(
+            _refresh_blocklist_periodically(),
+            name="blocklist-refresh",
+        )
+
+
 @client.event
 async def on_ready():
     global _bot_ready
-    load_blocklist()
+    await asyncio.to_thread(load_blocklist)
+    _ensure_blocklist_refresh_task()
     for guild in client.guilds:
         add_group(guild.id, guild.member_count)
     _refresh_guild_metrics()
@@ -224,24 +248,20 @@ async def on_message(message: discord.Message):
         if is_admin:
             text = _message_text(reported_msg)
             try:
-                _record_training_example(text, "BAN")
-                increment_stat('false_negatives')
-                FALSE_NEGATIVES.set(get_stat('false_negatives'))
-            except Exception as e:
-                logging.error(f"Training persistence failed for admin report: {e}")
-            try:
                 await reported_msg.delete()
                 await _execute_ban(
                     guild=message.guild,
                     user=reported_msg.author,
                     reason="Reported by admin",
                 )
-                await message.channel.send("✅ User banned.")
             except Exception as e:
                 logging.error(f"Error banning reported user: {e}")
                 await message.channel.send(
                     "⚠️ Could not ban user. Please retry or ban manually."
                 )
+            else:
+                _record_admin_report_outcome(text)
+                await message.channel.send("✅ User banned.")
         else:
             text = _message_text(reported_msg)
             images = await _snapshot_images(reported_msg)
@@ -439,6 +459,19 @@ def _record_training_example(text: str, label: str) -> None:
     add_example(trainable, label)
     if not sync_example_to_github(trainable, label):
         logging.warning("GitHub sync failed for %s example; local training kept", label)
+
+
+def _record_admin_report_outcome(text: str) -> None:
+    """Record a direct admin report only after Discord enforcement succeeds."""
+    try:
+        _record_training_example(text, "BAN")
+    except Exception as e:
+        logging.error(f"Training persistence failed for admin report: {e}")
+    try:
+        increment_stat('false_negatives')
+        FALSE_NEGATIVES.set(get_stat('false_negatives'))
+    except Exception as e:
+        logging.error(f"Error updating false_negatives metric: {e}")
 
 
 def _is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -948,7 +981,11 @@ class HITLFalseAlarmButton(
             logging.error(f"Error clearing strikes after false alarm: {e}")
 
         unban_note = "No auto-ban to reverse."
-        if take_reversible_auto_ban(self.guild_id, self.user_id, self.message_id):
+        auto_ban_message_id = take_reversible_auto_ban(
+            self.guild_id,
+            self.user_id,
+        )
+        if auto_ban_message_id is not None:
             try:
                 await guild.unban(
                     discord.Object(id=self.user_id),
@@ -963,7 +1000,11 @@ class HITLFalseAlarmButton(
                     self.user_id,
                     e,
                 )
-                record_auto_ban(self.guild_id, self.user_id, self.message_id)
+                record_auto_ban(
+                    self.guild_id,
+                    self.user_id,
+                    auto_ban_message_id,
+                )
                 await _edit_review_message(
                     interaction,
                     "⚠️ Could not unban automatically. Please try False Alarm again.",
@@ -1012,25 +1053,21 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
     if is_admin:
         text = _message_text(message)
         try:
-            _record_training_example(text, "BAN")
-            increment_stat('false_negatives')
-            FALSE_NEGATIVES.set(get_stat('false_negatives'))
-        except Exception as e:
-            logging.error(f"Training persistence failed for admin report: {e}")
-        try:
             await message.delete()
             await _execute_ban(
                 guild=interaction.guild,
                 user=message.author,
                 reason="Reported by admin",
             )
-            await interaction.followup.send("✅ User banned.", ephemeral=True)
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
             await interaction.followup.send(
                 "⚠️ Could not ban user. Please retry or ban manually.",
                 ephemeral=True,
             )
+        else:
+            _record_admin_report_outcome(text)
+            await interaction.followup.send("✅ User banned.", ephemeral=True)
     else:
         text = _message_text(message)
         images = await _snapshot_images(message)

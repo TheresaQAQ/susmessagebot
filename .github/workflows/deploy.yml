@@ -3,7 +3,7 @@ name: CI/CD
 on:
   push:
     branches:
-      - groq-approach
+      - main
     paths-ignore:
       # HITL sync commits seeds via GitHub API; skip rebuild loops.
       - "susmessagebot/seeds.py"
@@ -13,7 +13,7 @@ on:
       - "eval_results/**"
   pull_request:
     branches:
-      - groq-approach
+      - main
     paths-ignore:
       - "susmessagebot/seeds.py"
       - "assets/**"
@@ -94,7 +94,7 @@ jobs:
           TAG="${{ github.sha }}"
           echo "image=${IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
           echo "tags=${IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.ref }}" = "refs/heads/groq-approach" ]; then
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "tags=${IMAGE}:${TAG},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
           fi
 
@@ -118,7 +118,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/groq-approach'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     concurrency:
@@ -142,17 +142,21 @@ jobs:
           script: |
             set -euo pipefail
 
-            APP_DIR="${HOME}/susmessagebot"
-            mkdir -p "$APP_DIR"
-            cd "$APP_DIR"
+            APP_DIR="/opt/susmessagebot"
+            COMPOSE_FILE="${APP_DIR}/compose.yaml"
+            ENV_FILE="/opt/susmessagebot-secrets/.env"
+            sudo mkdir -p "$APP_DIR"
 
             # Install runtime configuration sent by Actions. The VPS never
             # clones or pulls the source repository.
-            printf '%s' "${COMPOSE_B64}" | base64 --decode > compose.yaml.tmp
-            mv compose.yaml.tmp compose.yaml
+            printf '%s' "${COMPOSE_B64}" \
+              | base64 --decode \
+              | sudo tee "${COMPOSE_FILE}.tmp" >/dev/null
+            sudo mv "${COMPOSE_FILE}.tmp" "$COMPOSE_FILE"
+            sudo chmod 644 "$COMPOSE_FILE"
 
-            if [ ! -f .env ]; then
-              echo "Missing ${APP_DIR}/.env; create it on the VPS before deploying"
+            if ! sudo test -f "$ENV_FILE"; then
+              echo "Missing ${ENV_FILE}; create it on the VPS before deploying"
               exit 1
             fi
 
@@ -162,49 +166,69 @@ jobs:
               sudo systemctl disable susmessagebot || true
             fi
 
-            mkdir -p data
-            if [ -f stats.db ] && [ ! -f data/stats.db ]; then
-              mv stats.db data/stats.db
-            fi
-            if [ -d chroma_db ] && [ ! -d data/chroma_db ]; then
-              mv chroma_db data/chroma_db
-            fi
-            # Container runs as UID 10001; bind-mounted ./data must be writable.
-            sudo chown -R 10001:10001 data
+            compose() {
+              sudo env IMAGE="${IMAGE}" \
+                docker compose -p susmessagebot -f "$COMPOSE_FILE" "$@"
+            }
 
-            PREVIOUS_IMAGE="$(docker inspect -f '{{.Config.Image}}' susmessagebot 2>/dev/null || true)"
+            wait_for_healthy() {
+              local expected_image="$1"
+              local phase="$2"
+              local status
+              local running_image
 
-            echo "${GHCR_READ_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
-            export IMAGE="${IMAGE}"
-            if docker compose pull && docker compose up -d --remove-orphans; then
-              echo "Waiting for container health..."
+              echo "Waiting for ${phase} container health..."
               for i in $(seq 1 36); do
-                STATUS="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' susmessagebot 2>/dev/null || echo missing)"
-                if [ "${STATUS}" = "healthy" ]; then
-                  echo "Deploy healthy with ${IMAGE}"
-                  docker logout ghcr.io >/dev/null 2>&1 || true
-                  exit 0
+                status="$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' susmessagebot 2>/dev/null || echo missing)"
+                running_image="$(sudo docker inspect -f '{{.Config.Image}}' susmessagebot 2>/dev/null || echo missing)"
+                if [ "${status}" = "healthy" ] && [ "${running_image}" = "${expected_image}" ]; then
+                  echo "${phase} healthy with ${expected_image}"
+                  return 0
                 fi
-                if [ "${STATUS}" = "unhealthy" ] || [ "${STATUS}" = "exited" ] || [ "${STATUS}" = "dead" ]; then
-                  echo "Container became ${STATUS}"
-                  break
+                if [ "${status}" = "healthy" ] && [ "${running_image}" != "${expected_image}" ]; then
+                  echo "${phase} started unexpected image ${running_image}"
+                  return 1
+                fi
+                if [ "${status}" = "unhealthy" ] || [ "${status}" = "exited" ] || [ "${status}" = "dead" ]; then
+                  echo "${phase} container became ${status}"
+                  return 1
                 fi
                 sleep 5
               done
-            else
-              echo "docker compose pull/up failed"
+              echo "${phase} container did not become healthy in time"
+              return 1
+            }
+
+            PREVIOUS_IMAGE="$(sudo docker inspect -f '{{.Config.Image}}' susmessagebot 2>/dev/null || true)"
+
+            echo "${GHCR_READ_TOKEN}" \
+              | sudo docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+            export IMAGE="${IMAGE}"
+            if compose pull \
+              && compose up -d --remove-orphans \
+              && wait_for_healthy "${IMAGE}" "Deploy"; then
+              sudo docker logout ghcr.io >/dev/null 2>&1 || true
+              exit 0
             fi
 
             echo "Deploy failed; dumping logs"
-            docker compose logs --tail=200 || true
+            compose logs --tail=200 || true
 
             if [ -n "${PREVIOUS_IMAGE}" ] && [ "${PREVIOUS_IMAGE}" != "${IMAGE}" ]; then
               echo "Rolling back to ${PREVIOUS_IMAGE}"
               export IMAGE="${PREVIOUS_IMAGE}"
-              docker compose up -d --remove-orphans || true
+              if compose up -d --remove-orphans \
+                && wait_for_healthy "${PREVIOUS_IMAGE}" "Rollback"; then
+                echo "Rollback completed successfully"
+              else
+                echo "Rollback failed; production is not confirmed healthy"
+                compose logs --tail=200 || true
+              fi
+            else
+              echo "No distinct previous image is available for rollback"
             fi
 
-            docker logout ghcr.io >/dev/null 2>&1 || true
+            sudo docker logout ghcr.io >/dev/null 2>&1 || true
             exit 1
         env:
           IMAGE: ${{ needs.build.outputs.image }}
