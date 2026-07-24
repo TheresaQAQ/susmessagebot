@@ -820,10 +820,13 @@ class HITLBanButton(
         if claim_state == "new":
             try:
                 _record_training_example(text, "BAN")
+            except Exception as e:
+                logging.error(f"Error recording ban training example: {e}")
+            try:
                 increment_stat('bans_confirmed')
                 BANS_CONFIRMED.set(get_stat('bans_confirmed'))
             except Exception as e:
-                logging.error(f"Error recording ban training example: {e}")
+                logging.error(f"Error updating bans_confirmed metric: {e}")
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
@@ -838,7 +841,6 @@ class HITLBanButton(
                 user=user,
                 reason="Confirmed by admin",
             )
-            await _edit_review_message(interaction, "🚫 User banned.")
         except Exception as e:
             logging.error(f"Error banning user: {e}")
             await _edit_review_message(
@@ -846,6 +848,11 @@ class HITLBanButton(
                 "⚠️ Ban failed. Please try Ban again.",
                 keep_view=True,
             )
+            return
+        try:
+            await _edit_review_message(interaction, "🚫 User banned.")
+        except Exception as e:
+            logging.error(f"Ban succeeded but review message edit failed: {e}")
 
 
 class HITLFalseAlarmButton(
@@ -915,6 +922,9 @@ class HITLFalseAlarmButton(
         if claim_state == "new":
             try:
                 _record_training_example(text, "SAFE")
+            except Exception as e:
+                logging.error(f"Error recording false-alarm training example: {e}")
+            try:
                 review_reason = (
                     get_review_reason(self.guild_id, self.message_id, self.user_id)
                     or ""
@@ -924,9 +934,12 @@ class HITLFalseAlarmButton(
                     increment_stat('false_positives')
                     FALSE_POSITIVES.set(get_stat('false_positives'))
             except Exception as e:
-                logging.error(f"Error recording false-alarm training example: {e}")
-            # Strike cleanup is mandatory even if training persistence fails.
+                logging.error(f"Error updating false_positives metric: {e}")
+        # Idempotent: also run on enforcement retries if an earlier clear failed.
+        try:
             strikes.clear(self.guild_id, self.user_id)
+        except Exception as e:
+            logging.error(f"Error clearing strikes after false alarm: {e}")
 
         unban_note = "No auto-ban to reverse."
         if take_reversible_auto_ban(self.guild_id, self.user_id, self.message_id):
@@ -952,10 +965,13 @@ class HITLFalseAlarmButton(
                 )
                 return
 
-        await _edit_review_message(
-            interaction,
-            f"❌ False alarm. {unban_note} Strikes cleared.",
-        )
+        try:
+            await _edit_review_message(
+                interaction,
+                f"❌ False alarm. {unban_note} Strikes cleared.",
+            )
+        except Exception as e:
+            logging.error(f"False alarm succeeded but review message edit failed: {e}")
 
 
 class HITLView(discord.ui.View):
@@ -1114,10 +1130,13 @@ class ReportConfirmButton(
         if claim_state == "new":
             try:
                 _record_training_example(text, "BAN")
+            except Exception as e:
+                logging.error(f"Error recording report ban training example: {e}")
+            try:
                 increment_stat('false_negatives')
                 FALSE_NEGATIVES.set(get_stat('false_negatives'))
             except Exception as e:
-                logging.error(f"Error recording report ban training example: {e}")
+                logging.error(f"Error updating false_negatives metric: {e}")
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
@@ -1132,10 +1151,6 @@ class ReportConfirmButton(
                 user=user,
                 reason="Confirmed by admin",
             )
-            await _edit_review_message(
-                interaction,
-                "✅ Report confirmed. User banned.",
-            )
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
             await _edit_review_message(
@@ -1143,6 +1158,14 @@ class ReportConfirmButton(
                 "⚠️ Ban failed. Please try Confirm Ban again.",
                 keep_view=True,
             )
+            return
+        try:
+            await _edit_review_message(
+                interaction,
+                "✅ Report confirmed. User banned.",
+            )
+        except Exception as e:
+            logging.error(f"Ban succeeded but review message edit failed: {e}")
 
 
 class ReportDismissButton(
