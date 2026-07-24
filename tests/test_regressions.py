@@ -1215,6 +1215,10 @@ class ThinkingFlagTests(unittest.TestCase):
             self.assertTrue(moderator._should_disable_thinking(model), model)
 
         self.assertFalse(should_disable_thinking("Qwen/Qwen2.5-7B-Instruct"))
+        # VL Instruct rejects enable_thinking; Thinking VL may still need the flag.
+        self.assertFalse(should_disable_thinking("Qwen/Qwen3-VL-8B-Instruct"))
+        self.assertTrue(should_disable_thinking("Qwen/Qwen3-VL-8B-Thinking"))
+        self.assertTrue(should_disable_thinking("Qwen/Qwen3.5-9B"))
 
 
 class ModelOverrideTests(unittest.TestCase):
