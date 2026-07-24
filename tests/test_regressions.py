@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -97,52 +98,82 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
             guild_permissions=SimpleNamespace(administrator=False),
         )
         return SimpleNamespace(
+            id=42,
             author=author,
             guild=SimpleNamespace(id=1, name="Test Guild"),
-            channel=SimpleNamespace(name="general"),
+            channel=SimpleNamespace(id=9, name="general"),
             content=content,
             attachments=attachments or [],
             mentions=[],
             reference=None,
         )
 
-    async def test_discord_text_error_is_sent_for_review_without_strike(self):
+    async def test_discord_text_error_is_sent_for_review_without_delete(self):
         message = self._discord_message()
         ban_user = AsyncMock()
+        request_review = AsyncMock()
 
         with (
             patch.object(bot_discord, "classify_message", return_value="REVIEW"),
             patch.object(bot_discord, "analyze_urls", return_value="SAFE"),
             patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", request_review),
         ):
             await bot_discord.on_message(message)
 
-        ban_user.assert_awaited_once_with(
+        ban_user.assert_not_awaited()
+        request_review.assert_awaited_once_with(
             message,
             reason="Text moderation unavailable",
-            record_strike=False,
         )
 
-    async def test_discord_invalid_image_is_sent_for_review_without_strike(self):
+    async def test_discord_invalid_image_is_sent_for_review_without_delete(self):
         attachment = SimpleNamespace(
             filename="broken.png",
             read=AsyncMock(return_value=b"not an image"),
         )
         message = self._discord_message(content="", attachments=[attachment])
         ban_user = AsyncMock()
+        request_review = AsyncMock()
 
         with (
             patch.object(bot_discord, "classify_image", return_value="REVIEW"),
             patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", request_review),
         ):
             await bot_discord.on_message(message)
 
-        ban_user.assert_awaited_once_with(
+        ban_user.assert_not_awaited()
+        request_review.assert_awaited_once_with(
             message,
             reason="Image moderation unavailable",
             evidence_images=[("broken.png", b"not an image")],
-            record_strike=False,
         )
+
+    async def test_manual_review_does_not_delete_or_count_ban(self):
+        message = self._discord_message()
+        message.delete = AsyncMock()
+        dm_admins = AsyncMock(return_value=1)
+        increment = MagicMock()
+
+        with (
+            patch.object(bot_discord, "_dm_admins_review", dm_admins),
+            patch.object(bot_discord, "increment_stat", increment),
+            patch.object(bot_discord, "_dm_user", AsyncMock()),
+        ):
+            await bot_discord._request_manual_review(
+                message,
+                reason="Text moderation unavailable",
+            )
+
+        message.delete.assert_not_awaited()
+        increment.assert_not_called()
+        dm_admins.assert_awaited_once()
+        kwargs = dm_admins.await_args.kwargs
+        self.assertFalse(kwargs["removed"])
+        self.assertEqual(kwargs["message_id"], 42)
+        self.assertEqual(kwargs["channel_id"], 9)
+        self.assertIn("not removed", kwargs["status"])
 
     async def test_discord_uses_image_content_type_without_file_extension(self):
         attachment = SimpleNamespace(
@@ -276,6 +307,8 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
             user_id=2,
             username="user",
             text="content",
+            message_id=3,
+            channel_id=4,
         )
         report = bot_discord.ReportReviewView(
             guild_id=1,
@@ -307,8 +340,9 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_failure_still_notifies_admins_and_user(self):
         author = SimpleNamespace(id=7)
         guild = SimpleNamespace(id=1, name="Test Guild")
-        channel = SimpleNamespace(name="general")
+        channel = SimpleNamespace(id=9, name="general")
         message = SimpleNamespace(
+            id=42,
             author=author,
             guild=guild,
             channel=channel,
@@ -319,14 +353,16 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
         dm_admins = AsyncMock(return_value=1)
         dm_user = AsyncMock()
 
-        with (
-            patch.object(bot_discord, "strikes", StrikeTracker(threshold=3)),
-            patch.object(bot_discord, "increment_stat"),
-            patch.object(bot_discord, "get_stat", return_value=0),
-            patch.object(bot_discord, "_dm_admins_review", dm_admins),
-            patch.object(bot_discord, "_dm_user", dm_user),
-        ):
-            await bot_discord._ban_user(message, reason="test")
+        with tempfile.NamedTemporaryFile(suffix=".db") as db:
+            tracker = StrikeTracker(threshold=3, db_path=db.name)
+            with (
+                patch.object(bot_discord, "strikes", tracker),
+                patch.object(bot_discord, "increment_stat"),
+                patch.object(bot_discord, "get_stat", return_value=0),
+                patch.object(bot_discord, "_dm_admins_review", dm_admins),
+                patch.object(bot_discord, "_dm_user", dm_user),
+            ):
+                await bot_discord._ban_user(message, reason="test")
 
         message.delete.assert_awaited_once()
         dm_admins.assert_awaited_once_with(
@@ -335,6 +371,8 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
             author=author,
             content="scam",
             reason="test",
+            message_id=42,
+            channel_id=9,
             images=[],
             removed=False,
         )
@@ -345,34 +383,133 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
         execute_ban = AsyncMock()
         author = SimpleNamespace(id=7)
         guild = SimpleNamespace(id=1, name="Test Guild")
-        channel = SimpleNamespace(name="general")
+        channel = SimpleNamespace(id=9, name="general")
 
-        with (
-            patch.object(bot_discord, "strikes", StrikeTracker(threshold=3)),
-            patch.object(bot_discord, "increment_stat"),
-            patch.object(bot_discord, "_dm_user", AsyncMock()),
-            patch.object(
-                bot_discord,
-                "_dm_admins_review",
-                AsyncMock(return_value=0),
-            ),
-            patch.object(bot_discord, "_dm_admins_text", AsyncMock()),
-            patch.object(bot_discord, "_execute_ban", execute_ban),
-            patch.object(bot_discord, "add_example"),
-            patch.object(bot_discord, "sync_example_to_github"),
-        ):
-            for _ in range(3):
-                message = SimpleNamespace(
-                    author=author,
-                    guild=guild,
-                    channel=channel,
-                    content="scam",
-                    attachments=[],
-                    delete=AsyncMock(),
-                )
-                await bot_discord._ban_user(message, reason="test")
+        with tempfile.NamedTemporaryFile(suffix=".db") as db:
+            tracker = StrikeTracker(threshold=3, db_path=db.name)
+            with (
+                patch.object(bot_discord, "strikes", tracker),
+                patch.object(bot_discord, "increment_stat"),
+                patch.object(bot_discord, "_dm_user", AsyncMock()),
+                patch.object(
+                    bot_discord,
+                    "_dm_admins_review",
+                    AsyncMock(return_value=0),
+                ),
+                patch.object(bot_discord, "_dm_admins_text", AsyncMock()),
+                patch.object(bot_discord, "_execute_ban", execute_ban),
+                patch.object(bot_discord, "add_example"),
+                patch.object(bot_discord, "sync_example_to_github"),
+            ):
+                for i in range(3):
+                    message = SimpleNamespace(
+                        id=100 + i,
+                        author=author,
+                        guild=guild,
+                        channel=channel,
+                        content="scam",
+                        attachments=[],
+                        delete=AsyncMock(),
+                    )
+                    await bot_discord._ban_user(message, reason="test")
 
         execute_ban.assert_not_awaited()
+
+
+class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_second_admin_decision_is_rejected(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+
+                first = stats.claim_review_decision(1, 42, 7, "false_alarm", 10)
+                second = stats.claim_review_decision(1, 42, 7, "ban", 11)
+
+                self.assertIsNone(first)
+                self.assertEqual(second, "false_alarm")
+                self.assertEqual(stats.get_review_decision(1, 42, 7), "false_alarm")
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_hitl_false_alarm_blocks_later_ban(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+
+                guild = SimpleNamespace(
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                )
+                interaction = SimpleNamespace(
+                    client=SimpleNamespace(get_guild=MagicMock(return_value=guild)),
+                    user=SimpleNamespace(id=11),
+                    response=SimpleNamespace(
+                        send_message=AsyncMock(),
+                        edit_message=AsyncMock(),
+                    ),
+                    message=SimpleNamespace(
+                        content="📝 Content:\nscam text",
+                    ),
+                )
+                button = bot_discord.HITLBanButton(
+                    guild_id=1,
+                    user_id=7,
+                    message_id=42,
+                    channel_id=9,
+                )
+                stats.claim_review_decision(1, 42, 7, "false_alarm", 10)
+
+                with (
+                    patch.object(bot_discord, "add_example") as add_example,
+                    patch.object(bot_discord, "sync_example_to_github") as sync,
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
+                ):
+                    await button.callback(interaction)
+
+                interaction.response.send_message.assert_awaited_once()
+                self.assertIn(
+                    "Already handled",
+                    interaction.response.send_message.await_args.args[0],
+                )
+                add_example.assert_not_called()
+                sync.assert_not_called()
+                execute_ban.assert_not_awaited()
+        finally:
+            stats.DB_PATH = old_db_path
+
+
+class StrikePersistenceTests(unittest.TestCase):
+    def test_strikes_survive_tracker_recreation(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as db:
+            first = StrikeTracker(threshold=3, window_seconds=600, db_path=db.name)
+            self.assertFalse(first.record(1, 7))
+            self.assertFalse(first.record(1, 7))
+            self.assertEqual(first.count(1, 7), 2)
+
+            second = StrikeTracker(threshold=3, window_seconds=600, db_path=db.name)
+            self.assertEqual(second.count(1, 7), 2)
+            self.assertTrue(second.record(1, 7))
+
+    def test_expired_strikes_are_pruned_from_sqlite(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as db:
+            tracker = StrikeTracker(threshold=3, window_seconds=10, db_path=db.name)
+            now = time.time()
+            with patch("susmessagebot.strike_tracker.time.time", return_value=now):
+                tracker.record(1, 7)
+            with patch(
+                "susmessagebot.strike_tracker.time.time",
+                return_value=now + 11,
+            ):
+                self.assertEqual(tracker.count(1, 7), 0)
 
 
 if __name__ == "__main__":

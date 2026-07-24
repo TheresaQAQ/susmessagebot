@@ -1,12 +1,15 @@
 """Short-window strike tracking for auto-ban after repeated BAN triggers."""
 from __future__ import annotations
 
-from collections import defaultdict, deque
+import sqlite3
 import time
+
+from .config import STATS_DB_PATH
 
 # 3 BAN classifications within this window → auto-ban (no admin confirm).
 STRIKE_WINDOW_SECONDS = 600
 STRIKE_THRESHOLD = 3
+
 
 def _fmt_duration(seconds: int) -> str:
     seconds = max(0, int(seconds))
@@ -66,46 +69,129 @@ class StrikeTracker:
         self,
         window_seconds: int = STRIKE_WINDOW_SECONDS,
         threshold: int = STRIKE_THRESHOLD,
+        db_path: str | None = None,
     ):
         self.window_seconds = window_seconds
         self.threshold = threshold
-        self._strikes: dict[tuple[int, int], deque[float]] = defaultdict(deque)
+        self.db_path = db_path or STATS_DB_PATH
+        self._ensure_table()
 
-    def _prune(self, key: tuple[int, int], now: float) -> None:
-        q = self._strikes[key]
-        while q and now - q[0] > self.window_seconds:
-            q.popleft()
-        if not q and key in self._strikes:
-            del self._strikes[key]
+    def _connect(self) -> sqlite3.Connection:
+        # isolation_level=None so callers can use explicit IMMEDIATE transactions.
+        return sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
+
+    def _ensure_table(self) -> None:
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strikes (
+                    scope_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    ts REAL NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_strikes_scope_user_ts
+                ON strikes (scope_id, user_id, ts)
+            ''')
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _prune(self, conn: sqlite3.Connection, scope_id: int, user_id: int, now: float) -> None:
+        cutoff = now - self.window_seconds
+        conn.execute(
+            "DELETE FROM strikes WHERE scope_id = ? AND user_id = ? AND ts <= ?",
+            (scope_id, user_id, cutoff),
+        )
 
     def record(self, scope_id: int, user_id: int) -> bool:
         """
         Record a BAN trigger. Returns True if the user should be auto-banned
         (threshold reached within the window).
         """
-        key = (scope_id, user_id)
         now = time.time()
-        self._prune(key, now)
-        self._strikes[key].append(now)
-        return len(self._strikes[key]) >= self.threshold
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                self._prune(conn, scope_id, user_id, now)
+                cursor.execute(
+                    "INSERT INTO strikes (scope_id, user_id, ts) VALUES (?, ?, ?)",
+                    (scope_id, user_id, now),
+                )
+                cursor.execute(
+                    "SELECT COUNT(*) FROM strikes WHERE scope_id = ? AND user_id = ?",
+                    (scope_id, user_id),
+                )
+                count = cursor.fetchone()[0]
+                conn.execute("COMMIT")
+                return count >= self.threshold
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
 
     def clear(self, scope_id: int, user_id: int) -> None:
-        self._strikes.pop((scope_id, user_id), None)
+        conn = self._connect()
+        try:
+            conn.execute(
+                "DELETE FROM strikes WHERE scope_id = ? AND user_id = ?",
+                (scope_id, user_id),
+            )
+        finally:
+            conn.close()
 
     def count(self, scope_id: int, user_id: int) -> int:
-        key = (scope_id, user_id)
-        self._prune(key, time.time())
-        return len(self._strikes.get(key, ()))
+        now = time.time()
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                self._prune(conn, scope_id, user_id, now)
+                cursor.execute(
+                    "SELECT COUNT(*) FROM strikes WHERE scope_id = ? AND user_id = ?",
+                    (scope_id, user_id),
+                )
+                count = cursor.fetchone()[0]
+                conn.execute("COMMIT")
+                return count
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
 
     def seconds_until_oldest_expires(self, scope_id: int, user_id: int) -> int:
         """Seconds until the oldest strike in the window drops off (0 if none)."""
-        key = (scope_id, user_id)
         now = time.time()
-        self._prune(key, now)
-        q = self._strikes.get(key)
-        if not q:
-            return 0
-        return max(0, int(q[0] + self.window_seconds - now))
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                self._prune(conn, scope_id, user_id, now)
+                cursor.execute(
+                    """
+                    SELECT MIN(ts) FROM strikes
+                    WHERE scope_id = ? AND user_id = ?
+                    """,
+                    (scope_id, user_id),
+                )
+                row = cursor.fetchone()
+                conn.execute("COMMIT")
+                if not row or row[0] is None:
+                    return 0
+                return max(0, int(row[0] + self.window_seconds - now))
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
 
 
 strikes = StrikeTracker()

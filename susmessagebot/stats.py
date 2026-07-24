@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import time
 
 from .config import STATS_DB_PATH
 
@@ -19,6 +20,106 @@ def init_db():
     conn.commit()
     conn.close()
     init_groups_table()
+    init_review_decisions_table()
+    init_strikes_table()
+
+
+def init_review_decisions_table():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS review_decisions (
+            review_key TEXT PRIMARY KEY,
+            decision TEXT NOT NULL,
+            decided_by INTEGER,
+            decided_at REAL NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+
+def review_key(guild_id: int, message_id: int, user_id: int) -> str:
+    return f"{guild_id}:{message_id}:{user_id}"
+
+
+def claim_review_decision(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    decision: str,
+    decided_by: int,
+) -> str | None:
+    """
+    Atomically claim the first admin decision for a review event.
+
+    Returns None if this caller won the claim, otherwise the existing decision.
+    """
+    key = review_key(guild_id, message_id, user_id)
+    now = time.time()
+    # isolation_level=None so we can use an explicit IMMEDIATE transaction.
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.execute(
+                "SELECT decision FROM review_decisions WHERE review_key = ?",
+                (key,),
+            )
+            row = cursor.fetchone()
+            if row:
+                conn.execute("ROLLBACK")
+                return row[0]
+            cursor.execute(
+                """
+                INSERT INTO review_decisions (review_key, decision, decided_by, decided_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (key, decision, decided_by, now),
+            )
+            conn.execute("COMMIT")
+            return None
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def get_review_decision(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+) -> str | None:
+    key = review_key(guild_id, message_id, user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT decision FROM review_decisions WHERE review_key = ?",
+        (key,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def init_strikes_table():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS strikes (
+            scope_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            ts REAL NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_strikes_scope_user_ts
+        ON strikes (scope_id, user_id, ts)
+    ''')
+    conn.commit()
+    conn.close()
 
 def get_stat(key: str) -> int:
     conn = sqlite3.connect(DB_PATH)

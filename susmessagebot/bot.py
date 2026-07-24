@@ -18,7 +18,15 @@ import io
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from prometheus_client import Gauge, start_http_server
-from .stats import init_db, get_stat, increment_stat, add_group, get_groups_count, get_total_members
+from .stats import (
+    init_db,
+    get_stat,
+    increment_stat,
+    add_group,
+    get_groups_count,
+    get_total_members,
+    claim_review_decision,
+)
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
@@ -216,16 +224,18 @@ async def on_message(message: discord.Message):
                 loop = asyncio.get_event_loop()
                 image_bytes = bytes(await attachment.read())
                 result = await loop.run_in_executor(None, classify_image, image_bytes)
-                if result in {"BAN", "REVIEW"}:
+                if result == "BAN":
                     await _ban_user(
                         message,
-                        reason=(
-                            "Suspicious image"
-                            if result == "BAN"
-                            else "Image moderation unavailable"
-                        ),
+                        reason="Suspicious image",
                         evidence_images=[(attachment.filename, image_bytes)],
-                        record_strike=result == "BAN",
+                    )
+                    return
+                if result == "REVIEW":
+                    await _request_manual_review(
+                        message,
+                        reason="Image moderation unavailable",
+                        evidence_images=[(attachment.filename, image_bytes)],
                     )
                     return
 
@@ -252,15 +262,12 @@ async def on_message(message: discord.Message):
         result,
     )
 
-    if result in {"BAN", "REVIEW"}:
-        await _ban_user(
+    if result == "BAN":
+        await _ban_user(message, reason="Suspicious message")
+    elif result == "REVIEW":
+        await _request_manual_review(
             message,
-            reason=(
-                "Suspicious message"
-                if result == "BAN"
-                else "Text moderation unavailable"
-            ),
-            record_strike=result == "BAN",
+            reason="Text moderation unavailable",
         )
     else:
         increment_stat('messages_safe')
@@ -363,16 +370,20 @@ async def _dm_admins_review(
     author: discord.abc.User,
     content: str,
     reason: str,
+    message_id: int,
+    channel_id: int,
     images: list[tuple[str, bytes]] | None = None,
     removed: bool = True,
+    status: str | None = None,
 ) -> int:
     """Send full content + Ban/False Alarm buttons to each admin via DM. Returns how many DMs succeeded."""
     preview = content if len(content) <= 1500 else content[:1500] + "..."
-    status = (
-        "Suspicious content removed"
-        if removed
-        else "Suspicious content flagged, but automatic removal failed"
-    )
+    if status is None:
+        status = (
+            "Suspicious content removed"
+            if removed
+            else "Suspicious content flagged, but automatic removal failed"
+        )
     body = (
         f"⚠️ {status} in **#{channel_name}** ({guild.name})\n\n"
         f"👤 User: {author} (`{author.id}`)\n\n"
@@ -387,12 +398,58 @@ async def _dm_admins_review(
                 username=str(author),
                 text=content,
                 reason=reason,
+                message_id=message_id,
+                channel_id=channel_id,
             )
             await admin.send(body, view=view, files=_discord_files(images))
             notified += 1
         except Exception as e:
             logging.warning(f"Could not DM admin {admin.id}: {e}")
     return notified
+
+
+async def _request_manual_review(
+    message: discord.Message,
+    reason: str,
+    *,
+    evidence_images: list[tuple[str, bytes]] | None = None,
+):
+    """
+    REVIEW path: notify admins only.
+
+    Do not delete the message, count messages_ban, record strikes, or write
+    punishment state — classification failed and needs human eyes.
+    """
+    author = message.author
+    guild = message.guild
+    if not guild:
+        return
+
+    channel_name = getattr(message.channel, "name", "unknown")
+    content = _message_text(message)
+    images = evidence_images if evidence_images is not None else await _snapshot_images(message)
+    notified = await _dm_admins_review(
+        guild,
+        channel_name=channel_name,
+        author=author,
+        content=content,
+        reason=reason,
+        message_id=message.id,
+        channel_id=message.channel.id,
+        images=images,
+        removed=False,
+        status="Moderation unavailable — manual review requested (message not removed)",
+    )
+    if notified == 0:
+        logging.error(
+            f"No admins notified for REVIEW in guild {guild.id} "
+            f"(message {message.id}, user {author.id})"
+        )
+    else:
+        logging.info(
+            f"REVIEW requested for user {author.id} message {message.id} "
+            f"({notified} admin DM(s))"
+        )
 
 
 async def _ban_user(
@@ -408,6 +465,8 @@ async def _ban_user(
     author = message.author
     guild = message.guild
     channel_name = getattr(message.channel, "name", "unknown")
+    message_id = message.id
+    channel_id = message.channel.id
     content = _message_text(message)
     images = evidence_images if evidence_images is not None else await _snapshot_images(message)
 
@@ -428,6 +487,8 @@ async def _ban_user(
         author=author,
         content=content,
         reason=reason,
+        message_id=message_id,
+        channel_id=channel_id,
         images=images,
         removed=deleted,
     )
@@ -472,6 +533,31 @@ async def _ban_user(
         )
 
 
+async def _claim_or_reject_review(
+    interaction: discord.Interaction,
+    *,
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    decision: str,
+) -> bool:
+    """Return True if this interaction owns the decision; otherwise reply and return False."""
+    existing = claim_review_decision(
+        guild_id,
+        message_id,
+        user_id,
+        decision,
+        interaction.user.id,
+    )
+    if existing is None:
+        return True
+    await interaction.response.send_message(
+        f"Already handled by another admin ({existing}).",
+        ephemeral=True,
+    )
+    return False
+
+
 async def _require_interaction_admin(
     interaction: discord.Interaction,
     guild_id: int,
@@ -511,16 +597,30 @@ def _interaction_review_text(interaction: discord.Interaction) -> str:
 
 class HITLBanButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"sm:h:b:(?P<guild_id>[0-9]+):(?P<user_id>[0-9]+)",
+    template=(
+        r"sm:h:b:(?P<guild_id>[0-9]+):(?P<user_id>[0-9]+):"
+        r"(?P<message_id>[0-9]+):(?P<channel_id>[0-9]+)"
+    ),
 ):
-    def __init__(self, guild_id: int, user_id: int):
+    def __init__(
+        self,
+        guild_id: int,
+        user_id: int,
+        message_id: int,
+        channel_id: int,
+    ):
         self.guild_id = guild_id
         self.user_id = user_id
+        self.message_id = message_id
+        self.channel_id = channel_id
         super().__init__(
             discord.ui.Button(
                 label="🚫 Ban",
                 style=discord.ButtonStyle.danger,
-                custom_id=f"sm:h:b:{guild_id}:{user_id}",
+                custom_id=(
+                    f"sm:h:b:{guild_id}:{user_id}:"
+                    f"{message_id}:{channel_id}"
+                ),
             )
         )
 
@@ -529,6 +629,8 @@ class HITLBanButton(
         return cls(
             guild_id=int(match["guild_id"]),
             user_id=int(match["user_id"]),
+            message_id=int(match["message_id"]),
+            channel_id=int(match["channel_id"]),
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -542,11 +644,26 @@ class HITLBanButton(
                 ephemeral=True,
             )
             return
+        if not await _claim_or_reject_review(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            decision="ban",
+        ):
+            return
         add_example(text, "BAN")
         sync_example_to_github(text, "BAN")
         increment_stat('bans_confirmed')
         BANS_CONFIRMED.set(get_stat('bans_confirmed'))
         try:
+            channel = guild.get_channel(self.channel_id)
+            if channel:
+                try:
+                    msg = await channel.fetch_message(self.message_id)
+                    await msg.delete()
+                except Exception:
+                    pass
             user = await interaction.client.fetch_user(self.user_id)
             await _execute_ban(
                 guild=guild,
@@ -567,16 +684,30 @@ class HITLBanButton(
 
 class HITLFalseAlarmButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"sm:h:f:(?P<guild_id>[0-9]+):(?P<user_id>[0-9]+)",
+    template=(
+        r"sm:h:f:(?P<guild_id>[0-9]+):(?P<user_id>[0-9]+):"
+        r"(?P<message_id>[0-9]+):(?P<channel_id>[0-9]+)"
+    ),
 ):
-    def __init__(self, guild_id: int, user_id: int):
+    def __init__(
+        self,
+        guild_id: int,
+        user_id: int,
+        message_id: int,
+        channel_id: int,
+    ):
         self.guild_id = guild_id
         self.user_id = user_id
+        self.message_id = message_id
+        self.channel_id = channel_id
         super().__init__(
             discord.ui.Button(
                 label="❌ False Alarm",
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"sm:h:f:{guild_id}:{user_id}",
+                custom_id=(
+                    f"sm:h:f:{guild_id}:{user_id}:"
+                    f"{message_id}:{channel_id}"
+                ),
             )
         )
 
@@ -585,6 +716,8 @@ class HITLFalseAlarmButton(
         return cls(
             guild_id=int(match["guild_id"]),
             user_id=int(match["user_id"]),
+            message_id=int(match["message_id"]),
+            channel_id=int(match["channel_id"]),
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -597,13 +730,21 @@ class HITLFalseAlarmButton(
                 ephemeral=True,
             )
             return
+        if not await _claim_or_reject_review(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            decision="false_alarm",
+        ):
+            return
         add_example(text, "SAFE")
         sync_example_to_github(text, "SAFE")
         increment_stat('false_positives')
         FALSE_POSITIVES.set(get_stat('false_positives'))
         strikes.clear(self.guild_id, self.user_id)
         await interaction.response.edit_message(
-            content="❌ False alarm. Message removed, user not banned.",
+            content="❌ False alarm. No ban applied.",
             view=None,
         )
 
@@ -615,11 +756,17 @@ class HITLView(discord.ui.View):
         user_id: int,
         username: str,
         text: str,
+        message_id: int,
+        channel_id: int,
         reason: str = "Suspicious message",
     ):
         super().__init__(timeout=None)
-        self.add_item(HITLBanButton(guild_id, user_id))
-        self.add_item(HITLFalseAlarmButton(guild_id, user_id))
+        self.add_item(
+            HITLBanButton(guild_id, user_id, message_id, channel_id)
+        )
+        self.add_item(
+            HITLFalseAlarmButton(guild_id, user_id, message_id, channel_id)
+        )
 
 
 @client.tree.context_menu(name="Report to SusMessageBot")
@@ -728,6 +875,14 @@ class ReportConfirmButton(
                 ephemeral=True,
             )
             return
+        if not await _claim_or_reject_review(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            decision="ban",
+        ):
+            return
         add_example(text, "BAN")
         sync_example_to_github(text, "BAN")
         increment_stat('false_negatives')
@@ -795,6 +950,14 @@ class ReportDismissButton(
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if not await _require_interaction_admin(interaction, self.guild_id):
+            return
+        if not await _claim_or_reject_review(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            decision="dismiss",
+        ):
             return
         await interaction.response.edit_message(
             content="❌ Report dismissed.",
