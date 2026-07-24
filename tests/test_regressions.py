@@ -1181,6 +1181,10 @@ class ConfigDefaultTests(unittest.TestCase):
 
         self.assertIn('"Qwen/Qwen2.5-7B-Instruct"', config_src)
         self.assertIn("SILICONFLOW_MODEL=Qwen/Qwen2.5-7B-Instruct", env_example)
+        self.assertIn(
+            "SILICONFLOW_VISION_MODEL=Qwen/Qwen3-VL-8B-Instruct",
+            env_example,
+        )
         self.assertIn("defaults to `Qwen/Qwen2.5-7B-Instruct`", readme)
 
 

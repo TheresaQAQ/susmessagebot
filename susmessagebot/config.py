@@ -19,9 +19,10 @@ SILICONFLOW_MODEL = os.getenv(
     os.getenv("OPENROUTER_MODEL", "Qwen/Qwen2.5-7B-Instruct"),
 )
 # Vision-capable model for image moderation (text-only defaults cannot see images).
+# Qwen2.5-VL-* was removed from SiliconFlow; Qwen3-VL-8B is the smallest Instruct VLM.
 SILICONFLOW_VISION_MODEL = os.getenv(
     "SILICONFLOW_VISION_MODEL",
-    "Qwen/Qwen2.5-VL-7B-Instruct",
+    "Qwen/Qwen3-VL-8B-Instruct",
 )
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")

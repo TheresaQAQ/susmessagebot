@@ -25,6 +25,8 @@ client = OpenAI(
 
 PROMPT_ID = os.getenv("PROMPT_ID", DEFAULT_PROMPT_ID)
 _IMAGE_MAX_SIDE = 1568
+# Qwen3-VL rejects images with either side smaller than 28.
+_IMAGE_MIN_SIDE = 28
 
 
 def _parse_verdict(content: str, prefer_last: bool = False) -> str:
@@ -73,10 +75,19 @@ def _image_to_data_url(image_bytes: bytes) -> str:
 
     w, h = img.size
     longest = max(w, h)
+    shortest = min(w, h)
     if longest > _IMAGE_MAX_SIDE:
         scale = _IMAGE_MAX_SIDE / longest
         img = img.resize(
             (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        w, h = img.size
+        shortest = min(w, h)
+    if shortest < _IMAGE_MIN_SIDE:
+        scale = _IMAGE_MIN_SIDE / shortest
+        img = img.resize(
+            (max(_IMAGE_MIN_SIDE, int(w * scale)), max(_IMAGE_MIN_SIDE, int(h * scale))),
             Image.Resampling.LANCZOS,
         )
 
