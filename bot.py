@@ -1,9 +1,11 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CommandHandler
 from telegram.constants import ChatMemberStatus
-from config import TELEGRAM_BOT_TOKEN, WEBHOOK_URL, USE_POLLING
+from config import TELEGRAM_BOT_TOKEN, WEBHOOK_URL, USE_POLLING, APPEAL_DISCORD_USER_ID
 from moderator import classify_message
+from url_moderator import analyze_urls
 from github_sync import sync_example_to_github
+from strike_tracker import strikes, remove_notice_text, ban_notice_text
 from prometheus_client import Gauge, start_http_server
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from stats import init_db, get_stat, increment_stat, decrement_stat, add_group, update_group_member_count, get_groups_count, get_total_members, get_all_group_ids
@@ -68,10 +70,47 @@ def start_health_server():
 
 banned_messages = {}
 
+
+async def _tg_dm(bot, user_id: int, text: str) -> None:
+    try:
+        await bot.send_message(chat_id=user_id, text=text)
+    except Exception as e:
+        logging.warning(f"Could not DM user {user_id}: {e}")
+
+
+async def _tg_execute_ban(bot, chat_id: int, user_id: int) -> None:
+    """DM ban notice first, then ban and clear strikes."""
+    await _tg_dm(bot, user_id, ban_notice_text(APPEAL_DISCORD_USER_ID))
+    await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+    strikes.clear(chat_id, user_id)
+
+
+async def _tg_dm_admins(bot, chat_id: int, text: str, reply_markup=None) -> int:
+    notified = 0
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+    except Exception as e:
+        logging.error(f"Could not fetch administrators: {e}")
+        return 0
+    for admin in admins:
+        if admin.user.is_bot:
+            continue
+        try:
+            await bot.send_message(
+                chat_id=admin.user.id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            notified += 1
+        except Exception as e:
+            logging.warning(f"Could not DM admin {admin.user.id}: {e}")
+    return notified
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles every incoming message.
-    Classifies it and bans the user if it is a scam/spam.
+    Classifies it; on BAN, deletes the message and notifies for admin review.
 
     Args:
         update: The incoming Telegram update
@@ -95,34 +134,103 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if is_new:
         GROUPS_COUNT.set(get_groups_count())
         MEMBERS_PROTECTED.set(get_total_members())
-    result = classify_message(text)
+    text_result, url_result = await asyncio.gather(
+        asyncio.to_thread(classify_message, text),
+        asyncio.to_thread(analyze_urls, text),
+    )
+    if text_result == "BAN" or url_result == "BAN":
+        result = "BAN"
+    elif text_result == "REVIEW" or url_result == "REVIEW":
+        result = "REVIEW"
+    else:
+        result = "SAFE"
+    logging.info(
+        "telegram classify user=%s text=%r text_result=%s url_result=%s final=%s",
+        user_id,
+        text[:120],
+        text_result,
+        url_result,
+        result,
+    )
 
-    if result == "BAN":
-        logging.info(f"BAN action taken on user {user_id}")
-        increment_stat('messages_ban')
-        MESSAGES_CLASSIFIED_BAN.set(get_stat('messages_ban'))
-        banned_messages[message_id] = {"user_id": user_id, "text": text}
+    if result in {"BAN", "REVIEW"}:
+        if result == "BAN":
+            increment_stat('messages_ban')
+            MESSAGES_CLASSIFIED_BAN.set(get_stat('messages_ban'))
+        banned_messages[message_id] = {
+            "user_id": user_id,
+            "text": text,
+            "verdict": result,
+        }
+        user = update.message.from_user
+        chat_title = update.message.chat.title or str(chat_id)
+        preview = text if len(text) <= 1500 else text[:1500] + "..."
 
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Correct Ban", callback_data=f"correct|{message_id}|{chat_id}"),
-                    InlineKeyboardButton("❌ Wrong Ban", callback_data=f"false|{message_id}|{chat_id}|{user_id}")
-                ]
-            ])
+        except Exception as e:
+            logging.error(f"Error deleting message: {e}")
+            return
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🚫 Ban", callback_data=f"correct|{message_id}|{chat_id}|{user_id}"),
+                InlineKeyboardButton("❌ False Alarm", callback_data=f"false|{message_id}|{chat_id}|{user_id}")
+            ]
+        ])
+        review_text = (
+            f"⚠️ {'Suspicious message' if result == 'BAN' else 'Unclassified message'} "
+            f"removed in {chat_title}\n\n"
+            f"👤 User: {user.full_name}"
+            f"{f' (@{user.username})' if user.username else ''}\n"
+            f"🆔 ID: {user_id}\n\n"
+            f"📝 Message:\n{preview}"
+        )
+        notified = await _tg_dm_admins(
+            context.bot, chat_id, review_text, reply_markup=keyboard
+        )
+        if notified == 0:
+            logging.error(
+                f"No admins notified for chat {chat_id} — "
+                "not recording a strike because no review path is available"
+            )
+            banned_messages.pop(message_id, None)
+        elif result == "BAN":
+            should_autoban = strikes.record(chat_id, user_id)
+            if should_autoban:
+                logging.info(f"Auto-ban after {strikes.threshold} reviewed triggers: user {user_id}")
+                from vector_store import add_example
+                add_example(text, "BAN")
+                sync_example_to_github(text, "BAN")
+                increment_stat('bans_confirmed')
+                BANS_CONFIRMED.set(get_stat('bans_confirmed'))
+                increment_stat('accurate_classifications')
+                ACCURATE_CLASSIFICATIONS.set(get_stat('accurate_classifications'))
+                try:
+                    await _tg_execute_ban(context.bot, chat_id, user_id)
+                except Exception as e:
+                    logging.error(f"Error auto-banning user: {e}")
+                    return
+                await _tg_dm_admins(
+                    context.bot,
+                    chat_id,
+                    f"🚫 Auto-banned {user.full_name} ({user_id}) in {chat_title} "
+                    f"after {strikes.threshold} reviewed triggers within "
+                    f"{strikes.window_seconds // 60} minutes.\n\n"
+                    f"📝 Last message:\n{preview}",
+                )
+                banned_messages.pop(message_id, None)
+                return
+
+        logging.info(f"Message removed (pending admin ban) for user {user_id}")
+        try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"⚠️ Suspicious message detected and removed.\n\n"
-                    f"👤 User: {update.message.from_user.full_name}"
-                    f"{f' (@{update.message.from_user.username})' if update.message.from_user.username else ''}\n"
-                    f"🆔 ID: {user_id}\n\n"
-                    f"📝 Message:\n{text[:200]}{'...' if len(text) > 200 else ''}",
-                reply_markup=keyboard
+                text=remove_notice_text(chat_id, user_id),
+                api_kwargs={"receiver_user_id": user_id},
             )
         except Exception as e:
-            logging.error(f"Error: {e}")
+            logging.warning(f"Could not send ephemeral notice to {user_id}: {e}")
     else:
         increment_stat('messages_safe')
         MESSAGES_CLASSIFIED_SAFE.set(get_stat('messages_safe'))
@@ -132,24 +240,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user_id = query.from_user.id
-    chat_id = query.message.chat_id
-
-    # check if clicker is admin
-    chat_member = await context.bot.get_chat_member(chat_id, user_id)
-    if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await query.answer("Only admins can do this.")
-        return
 
     data = query.data.split("|")
     action = data[0]
     message_id = int(data[1])
-    
+    group_chat_id = int(data[2])
+
+    # Admin check against the group (callback may arrive from a private DM)
+    chat_member = await context.bot.get_chat_member(group_chat_id, user_id)
+    if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await query.answer("Only admins can do this.")
+        return
+
     banned_info = banned_messages.get(message_id)
     if not banned_info:
         await query.answer("Action expired.")
         return
 
     if action == "correct":
+        banned_user_id = (
+            int(data[3])
+            if len(data) > 3
+            else int(banned_info["user_id"])
+        )
         from vector_store import add_example
         add_example(banned_info["text"], "BAN")
         sync_example_to_github(banned_info["text"], "BAN")
@@ -157,17 +270,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         BANS_CONFIRMED.set(get_stat('bans_confirmed'))
         increment_stat('accurate_classifications')
         ACCURATE_CLASSIFICATIONS.set(get_stat('accurate_classifications'))
-        await query.edit_message_text("✅ Ban confirmed.")
+        try:
+            await _tg_execute_ban(context.bot, group_chat_id, banned_user_id)
+            await query.edit_message_text("🚫 User banned.")
+        except Exception as e:
+            logging.error(f"Error banning user: {e}")
+            await query.edit_message_text("✅ Added to training. Could not ban user — they may have already left.")
         
     elif action == "false":
-        banned_user_id = int(data[3])
         from vector_store import add_example
         add_example(banned_info["text"], "SAFE")
         sync_example_to_github(banned_info["text"], "SAFE")
         increment_stat('false_positives')
         FALSE_POSITIVES.set(get_stat('false_positives'))
-        await context.bot.unban_chat_member(chat_id=chat_id, user_id=banned_user_id)
-        await query.edit_message_text("❌ False positive confirmed.")
+        strikes.clear(group_chat_id, banned_info["user_id"])
+        await query.edit_message_text("❌ False alarm. Message removed, user not banned.")
 
     del banned_messages[message_id]
     await query.answer()
@@ -239,7 +356,7 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ACCURATE_CLASSIFICATIONS.set(get_stat('accurate_classifications'))
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=reported_message_id)
-            await context.bot.ban_chat_member(chat_id=chat_id, user_id=reported_user_id)
+            await _tg_execute_ban(context.bot, chat_id, reported_user_id)
             await update.message.reply_text("✅ User banned.")
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
@@ -296,8 +413,11 @@ async def handle_report_callback(update: Update, context: ContextTypes.DEFAULT_T
             decrement_stat('accurate_classifications')
             ACCURATE_CLASSIFICATIONS.set(get_stat('accurate_classifications'))
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=report_info["message_id"])
-            await context.bot.ban_chat_member(chat_id=chat_id, user_id=report_info["user_id"])
+            await context.bot.delete_message(
+                chat_id=report_info["chat_id"],
+                message_id=report_info["message_id"],
+            )
+            await _tg_execute_ban(context.bot, report_info["chat_id"], report_info["user_id"])
             await query.edit_message_text("✅ Report confirmed. User banned.")
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")

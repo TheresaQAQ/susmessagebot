@@ -1,7 +1,9 @@
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'stats.db')
+from config import STATS_DB_PATH
+
+DB_PATH = STATS_DB_PATH
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)

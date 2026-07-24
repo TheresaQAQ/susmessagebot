@@ -7,7 +7,7 @@ except ImportError:
 
 import chromadb
 from sentence_transformers import SentenceTransformer
-from config import EMBEDDING_MODEL, SIMILARITY_THRESHOLD, MAX_EXAMPLES
+from config import EMBEDDING_MODEL, SIMILARITY_THRESHOLD, MAX_EXAMPLES, CHROMA_DB_PATH
 
 import os
 import warnings
@@ -25,7 +25,8 @@ hf_logging.set_verbosity_error()
 
 # Initialise embedding model and ChromaDB
 embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(name="examples")
 
 def add_example(message: str, label: str) -> None:
