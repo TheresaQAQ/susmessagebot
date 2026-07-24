@@ -28,6 +28,7 @@ from .stats import (
     get_total_members,
     claim_review_decision,
     release_review_decision,
+    get_review_decision_owner,
     store_review_evidence,
     get_review_evidence,
     get_review_reason,
@@ -662,8 +663,15 @@ async def _claim_or_reject_review(
     message_id: int,
     user_id: int,
     decision: str,
-) -> bool:
-    """Return True if this interaction owns the decision; otherwise reply and return False."""
+) -> str | None:
+    """
+    Claim a review decision or allow the same admin to retry enforcement.
+
+    Returns:
+      "new" — first successful claim
+      "retry" — same admin/same decision may retry Discord enforcement
+      None — rejected; an ephemeral reply was already sent
+    """
     existing = claim_review_decision(
         guild_id,
         message_id,
@@ -672,12 +680,15 @@ async def _claim_or_reject_review(
         interaction.user.id,
     )
     if existing is None:
-        return True
+        return "new"
+    owner = get_review_decision_owner(guild_id, message_id, user_id)
+    if owner and owner[0] == decision and owner[1] == interaction.user.id:
+        return "retry"
     await interaction.response.send_message(
         f"Already handled by another admin ({existing}).",
         ephemeral=True,
     )
-    return False
+    return None
 
 
 def _release_review_claim(
@@ -703,9 +714,18 @@ def _release_review_claim(
 async def _edit_review_message(
     interaction: discord.Interaction,
     content: str,
+    *,
+    view: discord.ui.View | None = None,
+    keep_view: bool = False,
 ) -> None:
     """Edit the review DM after the interaction has been deferred."""
-    await interaction.edit_original_response(content=content, view=None)
+    kwargs: dict = {"content": content}
+    if keep_view:
+        # Leave existing components untouched.
+        pass
+    else:
+        kwargs["view"] = view
+    await interaction.edit_original_response(**kwargs)
 
 
 async def _require_interaction_admin(
@@ -808,21 +828,23 @@ class HITLBanButton(
                 ephemeral=True,
             )
             return
-        if not await _claim_or_reject_review(
+        claim_state = await _claim_or_reject_review(
             interaction,
             guild_id=self.guild_id,
             message_id=self.message_id,
             user_id=self.user_id,
             decision="ban",
-        ):
+        )
+        if not claim_state:
             return
         await interaction.response.defer()
-        try:
-            _record_training_example(text, "BAN")
-            increment_stat('bans_confirmed')
-            BANS_CONFIRMED.set(get_stat('bans_confirmed'))
-        except Exception as e:
-            logging.error(f"Error recording ban training example: {e}")
+        if claim_state == "new":
+            try:
+                _record_training_example(text, "BAN")
+                increment_stat('bans_confirmed')
+                BANS_CONFIRMED.set(get_stat('bans_confirmed'))
+            except Exception as e:
+                logging.error(f"Error recording ban training example: {e}")
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
@@ -840,16 +862,10 @@ class HITLBanButton(
             await _edit_review_message(interaction, "🚫 User banned.")
         except Exception as e:
             logging.error(f"Error banning user: {e}")
-            _release_review_claim(
-                guild_id=self.guild_id,
-                message_id=self.message_id,
-                user_id=self.user_id,
-                decision="ban",
-                decided_by=interaction.user.id,
-            )
             await _edit_review_message(
                 interaction,
-                "⚠️ Ban failed. Please try again.",
+                "⚠️ Ban failed. Please try Ban again.",
+                keep_view=True,
             )
 
 
@@ -907,27 +923,31 @@ class HITLFalseAlarmButton(
                 ephemeral=True,
             )
             return
-        if not await _claim_or_reject_review(
+        claim_state = await _claim_or_reject_review(
             interaction,
             guild_id=self.guild_id,
             message_id=self.message_id,
             user_id=self.user_id,
             decision="false_alarm",
-        ):
+        )
+        if not claim_state:
             return
         await interaction.response.defer()
-        try:
-            _record_training_example(text, "SAFE")
-            review_reason = (
-                get_review_reason(self.guild_id, self.message_id, self.user_id) or ""
-            )
-            # Classifier outages are not false positives.
-            if "unavailable" not in review_reason.lower():
-                increment_stat('false_positives')
-                FALSE_POSITIVES.set(get_stat('false_positives'))
+        if claim_state == "new":
+            try:
+                _record_training_example(text, "SAFE")
+                review_reason = (
+                    get_review_reason(self.guild_id, self.message_id, self.user_id)
+                    or ""
+                )
+                # Classifier outages are not false positives.
+                if "unavailable" not in review_reason.lower():
+                    increment_stat('false_positives')
+                    FALSE_POSITIVES.set(get_stat('false_positives'))
+            except Exception as e:
+                logging.error(f"Error recording false-alarm training example: {e}")
+            # Strike cleanup is mandatory even if training persistence fails.
             strikes.clear(self.guild_id, self.user_id)
-        except Exception as e:
-            logging.error(f"Error recording false-alarm training example: {e}")
 
         unban_note = "No auto-ban to reverse."
         if take_reversible_auto_ban(self.guild_id, self.user_id, self.message_id):
@@ -946,16 +966,10 @@ class HITLFalseAlarmButton(
                     e,
                 )
                 record_auto_ban(self.guild_id, self.user_id, self.message_id)
-                _release_review_claim(
-                    guild_id=self.guild_id,
-                    message_id=self.message_id,
-                    user_id=self.user_id,
-                    decision="false_alarm",
-                    decided_by=interaction.user.id,
-                )
                 await _edit_review_message(
                     interaction,
-                    "⚠️ Could not unban automatically. Please try again.",
+                    "⚠️ Could not unban automatically. Please try False Alarm again.",
+                    keep_view=True,
                 )
                 return
 
@@ -1108,21 +1122,23 @@ class ReportConfirmButton(
                 ephemeral=True,
             )
             return
-        if not await _claim_or_reject_review(
+        claim_state = await _claim_or_reject_review(
             interaction,
             guild_id=self.guild_id,
             message_id=self.message_id,
             user_id=self.user_id,
             decision="ban",
-        ):
+        )
+        if not claim_state:
             return
         await interaction.response.defer()
-        try:
-            _record_training_example(text, "BAN")
-            increment_stat('false_negatives')
-            FALSE_NEGATIVES.set(get_stat('false_negatives'))
-        except Exception as e:
-            logging.error(f"Error recording report ban training example: {e}")
+        if claim_state == "new":
+            try:
+                _record_training_example(text, "BAN")
+                increment_stat('false_negatives')
+                FALSE_NEGATIVES.set(get_stat('false_negatives'))
+            except Exception as e:
+                logging.error(f"Error recording report ban training example: {e}")
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
@@ -1143,16 +1159,10 @@ class ReportConfirmButton(
             )
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
-            _release_review_claim(
-                guild_id=self.guild_id,
-                message_id=self.message_id,
-                user_id=self.user_id,
-                decision="ban",
-                decided_by=interaction.user.id,
-            )
             await _edit_review_message(
                 interaction,
-                "⚠️ Ban failed. Please try again.",
+                "⚠️ Ban failed. Please try Confirm Ban again.",
+                keep_view=True,
             )
 
 

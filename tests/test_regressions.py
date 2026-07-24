@@ -708,7 +708,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
         finally:
             stats.DB_PATH = old_db_path
 
-    async def test_failed_ban_enforcement_releases_claim_for_retry(self):
+    async def test_failed_ban_enforcement_keeps_claim_for_same_admin_retry(self):
         old_db_path = stats.DB_PATH
         try:
             with tempfile.NamedTemporaryFile(suffix=".db") as db:
@@ -730,9 +730,9 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 button = bot_discord.HITLBanButton(1, 7, 42, 9)
 
                 with (
-                    patch.object(bot_discord, "add_example"),
+                    patch.object(bot_discord, "add_example") as add_example,
                     patch.object(bot_discord, "sync_example_to_github", return_value=True),
-                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "increment_stat") as increment,
                     patch.object(bot_discord, "get_stat", return_value=1),
                     patch.object(
                         bot_discord,
@@ -742,23 +742,70 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await button.callback(interaction)
 
-                self.assertIsNone(stats.get_review_decision(1, 42, 7))
+                self.assertEqual(stats.get_review_decision(1, 42, 7), "ban")
+                add_example.assert_called_once_with("scam text", "BAN")
+                increment.assert_called_once_with("bans_confirmed")
                 body = interaction.edit_original_response.await_args.kwargs["content"]
-                self.assertIn("try again", body.lower())
+                self.assertIn("try ban again", body.lower())
+                self.assertTrue(
+                    interaction.edit_original_response.await_args.kwargs.get("keep_view")
+                    or "view" not in interaction.edit_original_response.await_args.kwargs
+                )
 
                 interaction2 = self._admin_interaction(guild)
                 with (
-                    patch.object(bot_discord, "add_example") as add_example,
+                    patch.object(bot_discord, "add_example") as add_example2,
                     patch.object(bot_discord, "sync_example_to_github", return_value=True),
-                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "increment_stat") as increment2,
                     patch.object(bot_discord, "get_stat", return_value=1),
                     patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban2,
                 ):
                     await button.callback(interaction2)
 
-                add_example.assert_called_once_with("scam text", "BAN")
+                add_example2.assert_not_called()
+                increment2.assert_not_called()
                 execute_ban2.assert_awaited_once()
                 self.assertEqual(stats.get_review_decision(1, 42, 7), "ban")
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_false_alarm_clears_strikes_even_if_training_fails(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
+                tracker = StrikeTracker(threshold=3, db_path=db.name)
+                tracker.record(1, 7)
+
+                guild = SimpleNamespace(
+                    id=1,
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    unban=AsyncMock(),
+                )
+                interaction = self._admin_interaction(guild)
+                button = bot_discord.HITLFalseAlarmButton(1, 7, 42, 9)
+
+                with (
+                    patch.object(bot_discord, "strikes", tracker),
+                    patch.object(
+                        bot_discord,
+                        "add_example",
+                        side_effect=RuntimeError("chroma down"),
+                    ),
+                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "get_stat", return_value=1),
+                ):
+                    await button.callback(interaction)
+
+                self.assertEqual(tracker.count(1, 7), 0)
         finally:
             stats.DB_PATH = old_db_path
 

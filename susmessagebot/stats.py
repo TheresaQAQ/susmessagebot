@@ -106,6 +106,26 @@ def get_review_decision(
     return row[0] if row else None
 
 
+def get_review_decision_owner(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+) -> tuple[str, int] | None:
+    """Return (decision, decided_by) when a claim exists."""
+    key = review_key(guild_id, message_id, user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT decision, decided_by FROM review_decisions WHERE review_key = ?",
+        (key,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row[0], int(row[1])
+
+
 def release_review_decision(
     guild_id: int,
     message_id: int,
