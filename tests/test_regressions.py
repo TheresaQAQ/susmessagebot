@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from susmessagebot import bot as bot_discord
 from susmessagebot import moderator, seeds, stats, url_moderator
@@ -246,6 +246,29 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(admins, [admin])
         guild.chunk.assert_awaited_once_with(cache=True)
+
+    async def test_interaction_admin_check_fetches_uncached_member(self):
+        admin = SimpleNamespace(
+            id=10,
+            guild_permissions=SimpleNamespace(administrator=True),
+        )
+        guild = SimpleNamespace(
+            owner_id=99,
+            get_member=MagicMock(return_value=None),
+            fetch_member=AsyncMock(return_value=admin),
+        )
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(get_guild=MagicMock(return_value=guild)),
+            user=SimpleNamespace(id=10),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        result = await bot_discord._require_interaction_admin(interaction, 1)
+
+        self.assertIs(result, guild)
+        guild.get_member.assert_called_once_with(10)
+        guild.fetch_member.assert_awaited_once_with(10)
+        interaction.response.send_message.assert_not_awaited()
 
     def test_review_views_use_persistent_components(self):
         hitl = bot_discord.HITLView(

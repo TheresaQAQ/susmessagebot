@@ -467,6 +467,11 @@ async def _require_interaction_admin(
         )
         return None
     member = guild.get_member(interaction.user.id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(interaction.user.id)
+        except Exception as e:
+            logging.warning(f"Could not fetch interaction member {interaction.user.id}: {e}")
     if member is None or not (
         member.id == guild.owner_id
         or member.guild_permissions.administrator
