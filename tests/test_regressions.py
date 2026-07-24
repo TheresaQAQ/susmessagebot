@@ -150,6 +150,55 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
             evidence_images=[("broken.png", b"not an image")],
         )
 
+    async def test_image_review_does_not_skip_text_ban(self):
+        attachment = SimpleNamespace(
+            filename="broken.png",
+            content_type="image/png",
+            read=AsyncMock(return_value=b"not an image"),
+        )
+        message = self._discord_message(
+            content="cheap accounts for sale",
+            attachments=[attachment],
+        )
+        ban_user = AsyncMock()
+        request_review = AsyncMock()
+
+        with (
+            patch.object(bot_discord, "classify_image", return_value="REVIEW"),
+            patch.object(bot_discord, "classify_message", return_value="BAN"),
+            patch.object(bot_discord, "analyze_urls", return_value="SAFE"),
+            patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", request_review),
+        ):
+            await bot_discord.on_message(message)
+
+        request_review.assert_not_awaited()
+        ban_user.assert_awaited_once_with(
+            message,
+            reason="Suspicious message",
+            evidence_images=[("broken.png", b"not an image")],
+        )
+
+    async def test_safe_image_only_message_is_counted(self):
+        attachment = SimpleNamespace(
+            filename="ok.png",
+            content_type="image/png",
+            read=AsyncMock(return_value=b"image bytes"),
+        )
+        message = self._discord_message(content="", attachments=[attachment])
+        increment = MagicMock()
+
+        with (
+            patch.object(bot_discord, "classify_image", return_value="SAFE"),
+            patch.object(bot_discord, "increment_stat", increment),
+            patch.object(bot_discord, "get_stat", return_value=1),
+            patch.object(bot_discord, "_ban_user", AsyncMock()),
+            patch.object(bot_discord, "_request_manual_review", AsyncMock()),
+        ):
+            await bot_discord.on_message(message)
+
+        increment.assert_called_once_with("messages_safe")
+
     async def test_manual_review_does_not_delete_or_count_ban(self):
         message = self._discord_message()
         message.delete = AsyncMock()

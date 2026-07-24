@@ -217,57 +217,78 @@ async def on_message(message: discord.Message):
     if message.author.guild_permissions.administrator:
         return
 
-    # Image moderation
+    # Aggregate modalities with BAN > REVIEW > SAFE. Image REVIEW must not
+    # short-circuit text/URL checks, or scam text attached to a broken image
+    # would only enter soft review.
+    loop = asyncio.get_event_loop()
+    final = "SAFE"
+    review_reason = "Moderation unavailable"
+    evidence_images: list[tuple[str, bytes]] = []
+
     if message.attachments:
         for attachment in message.attachments:
-            if _is_image_attachment(attachment):
-                loop = asyncio.get_event_loop()
+            if not _is_image_attachment(attachment):
+                continue
+            try:
                 image_bytes = bytes(await attachment.read())
-                result = await loop.run_in_executor(None, classify_image, image_bytes)
-                if result == "BAN":
-                    await _ban_user(
-                        message,
-                        reason="Suspicious image",
-                        evidence_images=[(attachment.filename, image_bytes)],
-                    )
-                    return
-                if result == "REVIEW":
-                    await _request_manual_review(
-                        message,
-                        reason="Image moderation unavailable",
-                        evidence_images=[(attachment.filename, image_bytes)],
-                    )
-                    return
+            except Exception as e:
+                logging.error(
+                    "Error reading attachment %s: %s",
+                    attachment.filename,
+                    e,
+                )
+                final = "REVIEW"
+                review_reason = "Image moderation unavailable"
+                continue
+            result = await loop.run_in_executor(None, classify_image, image_bytes)
+            evidence_images.append((attachment.filename, image_bytes))
+            if result == "BAN":
+                await _ban_user(
+                    message,
+                    reason="Suspicious image",
+                    evidence_images=[(attachment.filename, image_bytes)],
+                )
+                return
+            if result == "REVIEW":
+                final = "REVIEW"
+                review_reason = "Image moderation unavailable"
 
-    if not message.content:
+    text = (message.content or "").strip()
+    if text:
+        text_result = await loop.run_in_executor(None, classify_message, text)
+        url_result = await loop.run_in_executor(None, analyze_urls, text)
+        if text_result == "BAN" or url_result == "BAN":
+            final = "BAN"
+            review_reason = "Suspicious message"
+        elif text_result == "REVIEW" or url_result == "REVIEW":
+            if final != "BAN":
+                final = "REVIEW"
+                if review_reason == "Moderation unavailable":
+                    review_reason = "Text moderation unavailable"
+        logging.info(
+            "discord classify user=%s text=%r text_result=%s url_result=%s final=%s",
+            message.author.id,
+            text[:120],
+            text_result,
+            url_result,
+            final,
+        )
+    elif not evidence_images and final == "SAFE":
         return
 
-    # Text + URL classification
-    text = message.content
-    loop = asyncio.get_event_loop()
-    text_result = await loop.run_in_executor(None, classify_message, text)
-    url_result = await loop.run_in_executor(None, analyze_urls, text)
-    if text_result == "BAN" or url_result == "BAN":
-        result = "BAN"
-    elif text_result == "REVIEW" or url_result == "REVIEW":
-        result = "REVIEW"
-    else:
-        result = "SAFE"
-    logging.info(
-        "discord classify user=%s text=%r text_result=%s url_result=%s final=%s",
-        message.author.id,
-        text[:120],
-        text_result,
-        url_result,
-        result,
-    )
-
-    if result == "BAN":
-        await _ban_user(message, reason="Suspicious message")
-    elif result == "REVIEW":
+    if final == "BAN":
+        ban_kwargs = {}
+        if evidence_images:
+            ban_kwargs["evidence_images"] = evidence_images
+        await _ban_user(message, reason="Suspicious message", **ban_kwargs)
+    elif final == "REVIEW":
+        review_kwargs = {}
+        if evidence_images:
+            review_kwargs["evidence_images"] = evidence_images
         await _request_manual_review(
             message,
-            reason="Text moderation unavailable",
+            reason=review_reason,
+            **review_kwargs,
         )
     else:
         increment_stat('messages_safe')
