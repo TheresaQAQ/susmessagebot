@@ -3,7 +3,12 @@
 .env.*
 !.env.example
 
-# Python
+# Git / CI
+.git
+.github
+.gitignore
+
+# Python caches / virtualenvs
 __pycache__/
 *.py[cod]
 *$py.class
@@ -14,17 +19,14 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# Virtualenvs
 venv/
 .venv/
 env/
 
-# Local runtime data
+# Runtime data (must come from host volumes)
 chroma_db/
 stats.db
 *.db
-!*.sql
 data/
 
 # Eval / bakeoff artifacts
@@ -33,10 +35,21 @@ eval_results.jsonl
 *.log
 bakeoff.log
 
-# OS / editor
+# Docs / assets not needed at runtime
+assets/
+*.md
+!prompts/**/*.md
+
+# Editor / OS
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 *.swp
 *~
+
+# Local tooling
+Makefile
+Dockerfile
+compose.yaml
+.dockerignore

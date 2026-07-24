@@ -1,28 +1,198 @@
-name: Deploy to VPS
+name: CI/CD
+
 on:
   push:
+    branches:
+      - groq-approach
+    paths-ignore:
+      # HITL sync commits seeds via GitHub API; skip rebuild loops.
+      - "seeds.py"
+      - "assets/**"
+      - "**.md"
+      - "eval_results/**"
+  pull_request:
     branches:
       - groq-approach
     paths-ignore:
       - "seeds.py"
       - "assets/**"
       - "**.md"
-      - ".github/**"
+      - "eval_results/**"
+
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: susmessagebot
+
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: SSH and deploy
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-vps.txt
+
+      - name: Cache Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-minilm-l6-v2-${{ runner.os }}-${{ hashFiles('requirements-vps.txt') }}
+          restore-keys: |
+            hf-all-minilm-l6-v2-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pip install -r requirements-vps.txt
+
+      - name: Syntax check
+        run: |
+          python -m compileall -q \
+            bot.py bot_discord.py config.py moderator.py vector_store.py \
+            url_moderator.py image_moderator.py strike_tracker.py stats.py \
+            github_sync.py prompt_loader.py seeds.py eval_accuracy.py \
+            summarize_runs.py test_regressions.py
+
+      - name: Unit tests
+        env:
+          SILICONFLOW_API_KEY: ci-dummy
+          DISCORD_BOT_TOKEN: ci-dummy
+          TELEGRAM_BOT_TOKEN: ci-dummy
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          TOKENIZERS_PARALLELISM: "false"
+        run: python -m unittest test_regressions.py -v
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Image metadata
+        id: meta
+        run: |
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER}/${IMAGE_NAME}"
+          TAG="${{ github.sha }}"
+          echo "image=${IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
+          echo "tags=${IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref }}" = "refs/heads/groq-approach" ]; then
+            echo "tags=${IMAGE}:${TAG},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Login to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/groq-approach'
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to VPS over SSH
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: IMAGE,GHCR_USERNAME,GHCR_READ_TOKEN
           script: |
-            cd ~/susmessagebot
-            git pull origin groq-approach
-            source venv/bin/activate
-            pip install -r requirements-vps.txt -q
-            sudo systemctl restart susmessagebot
-            sleep 30
-            curl --max-time 10 http://localhost:8001/health || exit 1
+            set -euo pipefail
+
+            APP_DIR="${HOME}/susmessagebot"
+            cd "$APP_DIR"
+
+            # Stop legacy non-container process if still enabled.
+            if systemctl is-active --quiet susmessagebot 2>/dev/null; then
+              sudo systemctl stop susmessagebot || true
+              sudo systemctl disable susmessagebot || true
+            fi
+
+            # Fast-forward compose/config from the deploy branch.
+            git fetch origin groq-approach
+            git checkout groq-approach
+            git pull --ff-only origin groq-approach
+
+            mkdir -p data
+            if [ -f stats.db ] && [ ! -f data/stats.db ]; then
+              mv stats.db data/stats.db
+            fi
+            if [ -d chroma_db ] && [ ! -d data/chroma_db ]; then
+              mv chroma_db data/chroma_db
+            fi
+
+            PREVIOUS_IMAGE="$(docker inspect -f '{{.Config.Image}}' susmessagebot 2>/dev/null || true)"
+
+            echo "${GHCR_READ_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+            export IMAGE="${IMAGE}"
+            docker compose pull
+            docker compose up -d --remove-orphans
+
+            echo "Waiting for container health..."
+            for i in $(seq 1 36); do
+              STATUS="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' susmessagebot 2>/dev/null || echo missing)"
+              if [ "${STATUS}" = "healthy" ]; then
+                echo "Deploy healthy with ${IMAGE}"
+                docker logout ghcr.io >/dev/null 2>&1 || true
+                exit 0
+              fi
+              if [ "${STATUS}" = "unhealthy" ] || [ "${STATUS}" = "exited" ] || [ "${STATUS}" = "dead" ]; then
+                echo "Container became ${STATUS}"
+                break
+              fi
+              sleep 5
+            done
+
+            echo "Deploy failed; dumping logs"
+            docker compose logs --tail=200 || true
+
+            if [ -n "${PREVIOUS_IMAGE}" ] && [ "${PREVIOUS_IMAGE}" != "${IMAGE}" ]; then
+              echo "Rolling back to ${PREVIOUS_IMAGE}"
+              export IMAGE="${PREVIOUS_IMAGE}"
+              docker compose up -d --remove-orphans || true
+            fi
+
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            exit 1
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
