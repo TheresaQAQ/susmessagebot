@@ -8,6 +8,16 @@ from susmessagebot.strike_tracker import StrikeTracker
 
 
 class UrlModeratorRegressionTests(unittest.TestCase):
+    @patch(
+        "susmessagebot.url_moderator.client.chat.completions.create",
+        side_effect=RuntimeError("API unavailable"),
+    )
+    def test_url_api_error_requests_manual_review(self, create):
+        result = url_moderator.analyze_urls("Check this link: https://unknown.example/path")
+
+        self.assertEqual(result, "REVIEW")
+        create.assert_called_once()
+
     @patch("susmessagebot.url_moderator._classify_url_with_llm", return_value="BAN")
     def test_invite_domains_are_reviewed(self, classify_url):
         result = url_moderator.analyze_urls(

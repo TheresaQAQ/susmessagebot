@@ -63,7 +63,7 @@ def _is_on_blocklist(domain: str) -> bool:
 
 
 def _classify_url_with_llm(url: str) -> str:
-    """Use SiliconFlow to classify a URL as SAFE or BAN."""
+    """Use SiliconFlow to classify a URL as SAFE, BAN, or REVIEW."""
     try:
         create_kwargs = {
             "model": SILICONFLOW_MODEL,
@@ -108,7 +108,7 @@ Respond with exactly one word: SAFE or BAN"""
         return match.group(1) if match else "SAFE"
     except Exception as e:
         logging.error(f"URL LLM classification error: {e}")
-        return "SAFE"
+        return "REVIEW"
 
 
 def analyze_urls(text: str) -> str:
@@ -141,5 +141,7 @@ def analyze_urls(text: str) -> str:
         result = _classify_url_with_llm(url)
         if result == "BAN":
             return "BAN"
+        if result == "REVIEW":
+            return "REVIEW"
 
     return "SAFE"
