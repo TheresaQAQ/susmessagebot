@@ -9,6 +9,7 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 from .config import EMBEDDING_MODEL, SIMILARITY_THRESHOLD, MAX_EXAMPLES, CHROMA_DB_PATH
 
+import hashlib
 import os
 import warnings
 import logging
@@ -29,6 +30,12 @@ os.makedirs(CHROMA_DB_PATH, exist_ok=True)
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(name="examples")
 
+
+def _example_id(message: str) -> str:
+    """Stable, collision-resistant Chroma ID for a training example."""
+    return hashlib.sha256(message.encode("utf-8")).hexdigest()
+
+
 def add_example(message: str, label: str) -> None:
   """
   Converts an example message into an embedding and stores it in ChromaDB.
@@ -42,7 +49,7 @@ def add_example(message: str, label: str) -> None:
     embeddings = [embedding],
     documents = [message],
     metadatas=[{"label": label}],
-    ids=[str(hash(message))]
+    ids=[_example_id(message)]
   )
 
 def get_similar_examples(message:str) -> str:

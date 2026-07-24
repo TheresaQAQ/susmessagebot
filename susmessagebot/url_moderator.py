@@ -8,6 +8,7 @@ from .config import (
     SILICONFLOW_BASE_URL,
     SILICONFLOW_MODEL,
 )
+from .llm_utils import should_disable_thinking
 
 client = OpenAI(
     api_key=SILICONFLOW_API_KEY,
@@ -98,7 +99,7 @@ Respond with exactly one word: SAFE or BAN"""
             "max_tokens": 64,
             "temperature": 0,
         }
-        if "Qwen3" in SILICONFLOW_MODEL:
+        if should_disable_thinking(SILICONFLOW_MODEL):
             create_kwargs["extra_body"] = {"enable_thinking": False}
         response = client.chat.completions.create(**create_kwargs)
         message_obj = response.choices[0].message

@@ -1,12 +1,15 @@
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from susmessagebot import bot as bot_discord
 from susmessagebot import moderator, seeds, stats, url_moderator
+from susmessagebot.llm_utils import should_disable_thinking
 from susmessagebot.strike_tracker import StrikeTracker, ban_notice_text
+from susmessagebot.vector_store import _example_id
 
 
 class UrlModeratorRegressionTests(unittest.TestCase):
@@ -37,6 +40,26 @@ class UrlModeratorRegressionTests(unittest.TestCase):
         self.assertEqual(
             url_moderator.analyze_urls("See HTTPS://evil.example/path"),
             "BAN",
+        )
+
+    @patch("susmessagebot.url_moderator.SILICONFLOW_MODEL", "THUDM/GLM-4.6")
+    @patch("susmessagebot.url_moderator.client.chat.completions.create")
+    def test_url_moderator_disables_thinking_for_glm_models(self, create):
+        create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+
+        self.assertEqual(
+            url_moderator._classify_url_with_llm("https://example.com"),
+            "SAFE",
+        )
+        self.assertEqual(
+            create.call_args.kwargs.get("extra_body"),
+            {"enable_thinking": False},
         )
 
     @patch("susmessagebot.url_moderator.requests.get")
@@ -200,6 +223,23 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         request_review.assert_awaited_once_with(
             message,
             reason="Text moderation unavailable",
+        )
+
+    async def test_url_review_reason_is_not_labeled_as_text_failure(self):
+        message = self._discord_message(content="see https://unknown.example/x")
+        request_review = AsyncMock()
+
+        with (
+            patch.object(bot_discord, "classify_message", return_value="SAFE"),
+            patch.object(bot_discord, "analyze_urls", return_value="REVIEW"),
+            patch.object(bot_discord, "_ban_user", AsyncMock()),
+            patch.object(bot_discord, "_request_manual_review", request_review),
+        ):
+            await bot_discord.on_message(message)
+
+        request_review.assert_awaited_once_with(
+            message,
+            reason="URL moderation unavailable",
         )
 
     async def test_discord_invalid_image_is_sent_for_review_without_delete(self):
@@ -857,6 +897,41 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
         add_example.assert_not_called()
         sync.assert_not_called()
 
+    async def test_report_confirm_counts_bans_confirmed_not_false_negatives(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.store_review_evidence(1, 42, 7, "scam text", "User report")
+
+                guild = SimpleNamespace(
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    get_channel=MagicMock(return_value=None),
+                )
+                interaction = self._admin_interaction(guild)
+                button = bot_discord.ReportConfirmButton(1, 7, 42, 9)
+                increment = MagicMock()
+
+                with (
+                    patch.object(bot_discord, "add_example"),
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                    patch.object(bot_discord, "increment_stat", increment),
+                    patch.object(bot_discord, "get_stat", return_value=1),
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()),
+                ):
+                    await button.callback(interaction)
+
+                increment.assert_called_once_with("bans_confirmed")
+        finally:
+            stats.DB_PATH = old_db_path
+
 
 class BanNoticeTests(unittest.TestCase):
     def test_manual_ban_notice_is_not_auto_ban_copy(self):
@@ -867,6 +942,46 @@ class BanNoticeTests(unittest.TestCase):
     def test_automatic_ban_notice_mentions_auto_ban(self):
         text = ban_notice_text(automatic=True)
         self.assertIn("automatically banned", text.lower())
+
+
+class ConfigDefaultTests(unittest.TestCase):
+    def test_default_text_model_matches_readme(self):
+        root = Path(__file__).resolve().parents[1]
+        config_src = (root / "susmessagebot" / "config.py").read_text(encoding="utf-8")
+        env_example = (root / ".env.example").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn('"Qwen/Qwen2.5-7B-Instruct"', config_src)
+        self.assertIn("SILICONFLOW_MODEL=Qwen/Qwen2.5-7B-Instruct", env_example)
+        self.assertIn("defaults to `Qwen/Qwen2.5-7B-Instruct`", readme)
+
+
+class ThinkingFlagTests(unittest.TestCase):
+    def test_url_and_text_moderators_share_thinking_disable_rules(self):
+        for model in (
+            "Qwen/Qwen3-8B",
+            "THUDM/GLM-4.5",
+            "THUDM/GLM-4.6",
+            "THUDM/GLM-4.7",
+            "deepseek-ai/DeepSeek-V3",
+        ):
+            self.assertTrue(should_disable_thinking(model), model)
+            self.assertTrue(moderator._should_disable_thinking(model), model)
+
+        self.assertFalse(should_disable_thinking("Qwen/Qwen2.5-7B-Instruct"))
+
+
+class ExampleIdTests(unittest.TestCase):
+    def test_example_id_is_stable_sha256_hex(self):
+        first = _example_id("cheap accounts")
+        second = _example_id("cheap accounts")
+        other = _example_id("legit hello")
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, other)
+        self.assertEqual(len(first), 64)
+        self.assertEqual(first, __import__("hashlib").sha256(b"cheap accounts").hexdigest())
+        self.assertNotEqual(first, str(hash("cheap accounts")))
 
 
 class StrikePersistenceTests(unittest.TestCase):

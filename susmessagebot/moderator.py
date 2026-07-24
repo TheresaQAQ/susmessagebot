@@ -13,6 +13,7 @@ from .config import (
     SILICONFLOW_MODEL,
     SILICONFLOW_VISION_MODEL,
 )
+from .llm_utils import should_disable_thinking
 from .prompt_loader import DEFAULT_PROMPT_ID, render_prompt
 from .vector_store import get_similar_examples
 
@@ -44,14 +45,7 @@ def _parse_verdict(content: str, prefer_last: bool = False) -> str:
 
 
 def _should_disable_thinking(model: str | None = None) -> bool:
-    name = model or SILICONFLOW_MODEL
-    return (
-        "Qwen3" in name
-        or "GLM-4.5" in name
-        or "GLM-4.6" in name
-        or "GLM-4.7" in name
-        or "DeepSeek-V3" in name
-    )
+    return should_disable_thinking(model or SILICONFLOW_MODEL)
 
 
 def _verdict_from_response(response) -> tuple[str, str, str]:

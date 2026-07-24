@@ -330,8 +330,14 @@ async def on_message(message: discord.Message):
         elif text_result == "REVIEW" or url_result == "REVIEW":
             if final != "BAN":
                 final = "REVIEW"
+                # Keep an earlier image REVIEW reason; otherwise report the true source.
                 if review_reason == "Moderation unavailable":
-                    review_reason = "Text moderation unavailable"
+                    if text_result == "REVIEW" and url_result == "REVIEW":
+                        review_reason = "Text and URL moderation unavailable"
+                    elif text_result == "REVIEW":
+                        review_reason = "Text moderation unavailable"
+                    else:
+                        review_reason = "URL moderation unavailable"
         logging.info(
             "discord classify user=%s text=%r text_result=%s url_result=%s final=%s",
             message.author.id,
@@ -1133,10 +1139,12 @@ class ReportConfirmButton(
             except Exception as e:
                 logging.error(f"Error recording report ban training example: {e}")
             try:
-                increment_stat('false_negatives')
-                FALSE_NEGATIVES.set(get_stat('false_negatives'))
+                # Confirming a user report is an admin-confirmed ban, not a bot miss.
+                # Direct admin reports (context menu / @mention) still count false_negatives.
+                increment_stat('bans_confirmed')
+                BANS_CONFIRMED.set(get_stat('bans_confirmed'))
             except Exception as e:
-                logging.error(f"Error updating false_negatives metric: {e}")
+                logging.error(f"Error updating bans_confirmed metric: {e}")
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:

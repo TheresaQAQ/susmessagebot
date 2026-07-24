@@ -13,10 +13,10 @@ SILICONFLOW_BASE_URL = os.getenv(
     "SILICONFLOW_BASE_URL",
     os.getenv("OPENROUTER_BASE_URL", "https://api.siliconflow.cn/v1"),
 )
-# Bakeoff winner under v2_zh_balanced; override via SILICONFLOW_MODEL.
+# Default matches README / SiliconFlow free-tier docs; override via SILICONFLOW_MODEL.
 SILICONFLOW_MODEL = os.getenv(
     "SILICONFLOW_MODEL",
-    os.getenv("OPENROUTER_MODEL", "Qwen/Qwen3-8B"),
+    os.getenv("OPENROUTER_MODEL", "Qwen/Qwen2.5-7B-Instruct"),
 )
 # Vision-capable model for image moderation (text-only defaults cannot see images).
 SILICONFLOW_VISION_MODEL = os.getenv(
