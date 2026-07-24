@@ -870,7 +870,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
 
                 interaction.response.send_message.assert_awaited_once()
                 self.assertIn(
-                    "Already handled",
+                    "该审核已被其他管理员处理",
                     interaction.response.send_message.await_args.args[0],
                 )
                 add_example.assert_not_called()
@@ -918,7 +918,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tracker.count(1, 7), 0)
                 interaction.response.defer.assert_awaited_once()
                 body = interaction.edit_original_response.await_args.kwargs["content"]
-                self.assertIn("Auto-ban reversed", body)
+                self.assertIn("已撤销自动封禁", body)
         finally:
             stats.DB_PATH = old_db_path
 
@@ -955,7 +955,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
 
                 guild.unban.assert_not_awaited()
                 body = interaction.edit_original_response.await_args.kwargs["content"]
-                self.assertIn("No auto-ban to reverse", body)
+                self.assertIn("无自动封禁记录可撤销", body)
         finally:
             stats.DB_PATH = old_db_path
 
@@ -997,7 +997,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 add_example.assert_called_once_with("scam text", "BAN")
                 increment.assert_called_once_with("bans_confirmed")
                 body = interaction.edit_original_response.await_args.kwargs["content"]
-                self.assertIn("try ban again", body.lower())
+                self.assertIn("再点一次「封禁」", body)
                 self.assertTrue(
                     interaction.edit_original_response.await_args.kwargs.get("keep_view")
                     or "view" not in interaction.edit_original_response.await_args.kwargs
@@ -1149,10 +1149,27 @@ class BanNoticeTests(unittest.TestCase):
         text = ban_notice_text(automatic=False)
         self.assertIn("moderator confirmed", text.lower())
         self.assertNotIn("automatically banned", text.lower())
+        self.assertNotIn("你因", text)
+        self.assertNotIn("Вы были", text)
 
     def test_automatic_ban_notice_mentions_auto_ban(self):
         text = ban_notice_text(automatic=True)
         self.assertIn("automatically banned", text.lower())
+        self.assertNotIn("你因", text)
+        self.assertNotIn("Вы были", text)
+
+    def test_remove_notice_is_english_only(self):
+        from susmessagebot.strike_tracker import remove_notice_text
+
+        with tempfile.NamedTemporaryFile(suffix=".db") as db:
+            tracker = StrikeTracker(threshold=3, db_path=db.name)
+            with patch("susmessagebot.strike_tracker.strikes", tracker):
+                tracker.record(1, 7)
+                text = remove_notice_text(1, 7)
+
+        self.assertIn("violating community rules", text.lower())
+        self.assertNotIn("社区规则", text)
+        self.assertNotIn("Ваше сообщение", text)
 
 
 class ConfigDefaultTests(unittest.TestCase):

@@ -267,9 +267,9 @@ async def on_message(message: discord.Message):
             images = await _snapshot_images(reported_msg)
             preview = text if len(text) <= 1500 else text[:1500] + "..."
             body = (
-                f"🚨 Scam report by {message.author} in **#{message.channel.name}**\n\n"
-                f"👤 Reported user: {reported_msg.author} (`{reported_msg.author.id}`)\n\n"
-                f"📝 Content:\n{preview}"
+                f"🚨 用户举报：{message.author} 在 **#{message.channel.name}**\n\n"
+                f"👤 被举报用户：{reported_msg.author} (`{reported_msg.author.id}`)\n\n"
+                f"📝 内容：\n{preview}"
             )
             store_review_evidence(
                 message.guild.id,
@@ -535,14 +535,14 @@ async def _dm_admins_review(
     preview = content if len(content) <= 1500 else content[:1500] + "..."
     if status is None:
         status = (
-            "Suspicious content removed"
+            "可疑内容已删除"
             if removed
-            else "Suspicious content flagged, but automatic removal failed"
+            else "可疑内容已标记，但自动删除失败"
         )
     body = (
-        f"⚠️ {status} in **#{channel_name}** ({guild.name})\n\n"
-        f"👤 User: {author} (`{author.id}`)\n\n"
-        f"📝 Content:\n{preview}"
+        f"⚠️ {status}｜**#{channel_name}**（{guild.name}）\n\n"
+        f"👤 用户：{author} (`{author.id}`)\n\n"
+        f"📝 内容：\n{preview}"
     )
     notified = 0
     for admin in await _admin_members(guild):
@@ -593,7 +593,7 @@ async def _request_manual_review(
         channel_id=message.channel.id,
         images=images,
         removed=False,
-        status="Moderation unavailable — manual review requested (message not removed)",
+        status="审核服务不可用，已请求人工复核（消息未删除）",
     )
     if notified == 0:
         logging.error(
@@ -675,9 +675,9 @@ async def _ban_user(
                 return
             await _dm_admins_text(
                 guild,
-                f"🚫 Auto-banned {author} (`{author.id}`) in **#{channel_name}** "
-                f"after {threshold} reviewed triggers within {window_min} minutes.\n\n"
-                f"📝 Last content:\n{content[:1500]}{'...' if len(content) > 1500 else ''}",
+                f"🚫 已自动封禁 {author}（`{author.id}`），频道 **#{channel_name}**\n"
+                f"原因：{window_min} 分钟内累计 {threshold} 次已复核触发。\n\n"
+                f"📝 最近内容：\n{content[:1500]}{'...' if len(content) > 1500 else ''}",
                 images=images,
             )
             return
@@ -723,7 +723,7 @@ async def _claim_or_reject_review(
     if owner and owner[0] == decision and owner[1] == interaction.user.id:
         return "retry"
     await interaction.response.send_message(
-        f"Already handled by another admin ({existing}).",
+        f"该审核已被其他管理员处理（{existing}）。",
         ephemeral=True,
     )
     return None
@@ -753,7 +753,7 @@ async def _require_interaction_admin(
     guild = interaction.client.get_guild(guild_id)
     if not guild:
         await interaction.response.send_message(
-            "Server not found (bot may have left).",
+            "未找到服务器（机器人可能已离开）。",
             ephemeral=True,
         )
         return None
@@ -768,7 +768,7 @@ async def _require_interaction_admin(
         or member.guild_permissions.administrator
     ):
         await interaction.response.send_message(
-            "Only admins can do this.",
+            "仅管理员可操作。",
             ephemeral=True,
         )
         return None
@@ -787,9 +787,11 @@ def _interaction_review_text(
         return stored
     message = interaction.message
     content = (message.content if message else "") or ""
-    marker = "📝 Content:\n"
-    _, separator, review_text = content.partition(marker)
-    return review_text.strip() if separator else ""
+    for marker in ("📝 内容：\n", "📝 Content:\n"):
+        _, separator, review_text = content.partition(marker)
+        if separator:
+            return review_text.strip()
+    return ""
 
 
 class HITLBanButton(
@@ -812,7 +814,7 @@ class HITLBanButton(
         self.channel_id = channel_id
         super().__init__(
             discord.ui.Button(
-                label="🚫 Ban",
+                label="🚫 封禁",
                 style=discord.ButtonStyle.danger,
                 custom_id=(
                     f"sm:h:b:{guild_id}:{user_id}:"
@@ -842,7 +844,7 @@ class HITLBanButton(
         )
         if not text:
             await interaction.response.send_message(
-                "Review context is unavailable.",
+                "审核上下文不可用。",
                 ephemeral=True,
             )
             return
@@ -884,12 +886,12 @@ class HITLBanButton(
             logging.error(f"Error banning user: {e}")
             await _edit_review_message(
                 interaction,
-                "⚠️ Ban failed. Please try Ban again.",
+                "⚠️ 封禁失败，请再点一次「封禁」。",
                 keep_view=True,
             )
             return
         try:
-            await _edit_review_message(interaction, "🚫 User banned.")
+            await _edit_review_message(interaction, "🚫 已封禁该用户。")
         except Exception as e:
             logging.error(f"Ban succeeded but review message edit failed: {e}")
 
@@ -914,7 +916,7 @@ class HITLFalseAlarmButton(
         self.channel_id = channel_id
         super().__init__(
             discord.ui.Button(
-                label="❌ False Alarm",
+                label="❌ 误报",
                 style=discord.ButtonStyle.secondary,
                 custom_id=(
                     f"sm:h:f:{guild_id}:{user_id}:"
@@ -944,7 +946,7 @@ class HITLFalseAlarmButton(
         )
         if not text:
             await interaction.response.send_message(
-                "Review context is unavailable.",
+                "审核上下文不可用。",
                 ephemeral=True,
             )
             return
@@ -980,7 +982,7 @@ class HITLFalseAlarmButton(
         except Exception as e:
             logging.error(f"Error clearing strikes after false alarm: {e}")
 
-        unban_note = "No auto-ban to reverse."
+        unban_note = "无自动封禁记录可撤销。"
         auto_ban_message_id = take_reversible_auto_ban(
             self.guild_id,
             self.user_id,
@@ -991,9 +993,9 @@ class HITLFalseAlarmButton(
                     discord.Object(id=self.user_id),
                     reason="False alarm confirmed",
                 )
-                unban_note = "Auto-ban reversed."
+                unban_note = "已撤销自动封禁。"
             except discord.NotFound:
-                unban_note = "Auto-ban record cleared."
+                unban_note = "自动封禁记录已清除。"
             except Exception as e:
                 logging.warning(
                     "Could not unban user %s after false alarm: %s",
@@ -1007,7 +1009,7 @@ class HITLFalseAlarmButton(
                 )
                 await _edit_review_message(
                     interaction,
-                    "⚠️ Could not unban automatically. Please try False Alarm again.",
+                    "⚠️ 自动解封失败，请再点一次「误报」。",
                     keep_view=True,
                 )
                 return
@@ -1015,7 +1017,7 @@ class HITLFalseAlarmButton(
         try:
             await _edit_review_message(
                 interaction,
-                f"❌ False alarm. {unban_note} Strikes cleared.",
+                f"❌ 判定为误报。{unban_note} 违规计数已清零。",
             )
         except Exception as e:
             logging.error(f"False alarm succeeded but review message edit failed: {e}")
@@ -1080,9 +1082,9 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
         )
         preview = text if len(text) <= 1500 else text[:1500] + "..."
         body = (
-            f"🚨 Scam report by {interaction.user} in **#{message.channel.name}**\n\n"
-            f"👤 Reported user: {message.author} (`{message.author.id}`)\n\n"
-            f"📝 Content:\n{preview}"
+            f"🚨 用户举报：{interaction.user} 在 **#{message.channel.name}**\n\n"
+            f"👤 被举报用户：{message.author} (`{message.author.id}`)\n\n"
+            f"📝 内容：\n{preview}"
         )
         notified = 0
         for admin in await _admin_members(interaction.guild):
@@ -1126,7 +1128,7 @@ class ReportConfirmButton(
         self.channel_id = channel_id
         super().__init__(
             discord.ui.Button(
-                label="✅ Confirm Ban",
+                label="✅ 确认封禁",
                 style=discord.ButtonStyle.green,
                 custom_id=(
                     f"sm:r:b:{guild_id}:{user_id}:"
@@ -1156,7 +1158,7 @@ class ReportConfirmButton(
         )
         if not text:
             await interaction.response.send_message(
-                "Review context is unavailable.",
+                "审核上下文不可用。",
                 ephemeral=True,
             )
             return
@@ -1200,14 +1202,14 @@ class ReportConfirmButton(
             logging.error(f"Error banning reported user: {e}")
             await _edit_review_message(
                 interaction,
-                "⚠️ Ban failed. Please try Confirm Ban again.",
+                "⚠️ 封禁失败，请再点一次「确认封禁」。",
                 keep_view=True,
             )
             return
         try:
             await _edit_review_message(
                 interaction,
-                "✅ Report confirmed. User banned.",
+                "✅ 举报已确认，用户已封禁。",
             )
         except Exception as e:
             logging.error(f"Ban succeeded but review message edit failed: {e}")
@@ -1233,7 +1235,7 @@ class ReportDismissButton(
         self.channel_id = channel_id
         super().__init__(
             discord.ui.Button(
-                label="❌ Dismiss",
+                label="❌ 驳回",
                 style=discord.ButtonStyle.red,
                 custom_id=(
                     f"sm:r:d:{guild_id}:{user_id}:"
@@ -1263,7 +1265,7 @@ class ReportDismissButton(
         ):
             return
         await interaction.response.defer()
-        await _edit_review_message(interaction, "❌ Report dismissed.")
+        await _edit_review_message(interaction, "❌ 举报已驳回。")
 
 
 class ReportReviewView(discord.ui.View):
