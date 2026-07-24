@@ -89,7 +89,7 @@ def _image_to_data_url(image_bytes: bytes) -> str:
 
 def classify_message(message: str) -> str:
     """
-    Classifies a Discord/Telegram message as SAFE, BAN, or REVIEW.
+    Classifies a Discord message as SAFE, BAN, or REVIEW.
 
     REVIEW means classification failed and the message requires manual review.
     """

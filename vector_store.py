@@ -50,7 +50,7 @@ def get_similar_examples(message:str) -> str:
   Retrieves most similar examples from ChromaDB for a given input.
 
   Args:
-    message: Incoming Telegram message
+    message: Incoming Discord message
 
   Returns:
     A formatted string of similar examples to inject into the prompt, or empty string if no relevant examples found.

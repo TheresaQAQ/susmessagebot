@@ -7,10 +7,6 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://susmessagebot.commonertech.dev")
-USE_POLLING = os.getenv("USE_POLLING", "false").lower() == "true"
-
 # SiliconFlow (OpenAI-compatible). OPENROUTER_* kept as fallback aliases.
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY") or os.getenv("OPENROUTER_API_KEY")
 SILICONFLOW_BASE_URL = os.getenv(

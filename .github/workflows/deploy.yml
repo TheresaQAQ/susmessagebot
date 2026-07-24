@@ -58,7 +58,7 @@ jobs:
       - name: Syntax check
         run: |
           python -m compileall -q \
-            bot.py bot_discord.py config.py moderator.py vector_store.py \
+            bot_discord.py config.py moderator.py vector_store.py \
             url_moderator.py image_moderator.py strike_tracker.py stats.py \
             github_sync.py prompt_loader.py seeds.py eval_accuracy.py \
             summarize_runs.py test_regressions.py
@@ -67,7 +67,6 @@ jobs:
         env:
           SILICONFLOW_API_KEY: ci-dummy
           DISCORD_BOT_TOKEN: ci-dummy
-          TELEGRAM_BOT_TOKEN: ci-dummy
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
           TOKENIZERS_PARALLELISM: "false"
         run: python -m unittest test_regressions.py -v

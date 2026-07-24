@@ -1,6 +1,6 @@
 # susmessagebot
 
-An AI-powered Telegram/Discord moderation bot that detects and bans scammers in real time using semantic understanding, RAG, and a Human-in-the-Loop feedback system.
+An AI-powered Discord moderation bot that detects and bans scammers in real time using semantic understanding, RAG, and a Human-in-the-Loop feedback system.
 
 ## Branding
 
@@ -8,7 +8,7 @@ This is proudly a @commonertech product.
 
 ## Why
 
-Singaporeans lost a record S$1.1 billion to scams in 2024 and S$913.1 million in 2025 (Singapore Police Force). Telegram is explicitly named by SPF as one of the top platforms exploited by scammers. Existing moderation tools rely on static keyword rules that scammers trivially bypass with character substitution and deliberate typos. This bot was built to fight back using semantic understanding instead of keyword matching.
+Singaporeans lost a record S$1.1 billion to scams in 2024 and S$913.1 million in 2025 (Singapore Police Force). Community platforms are frequently exploited by scammers, while existing moderation tools rely on static keyword rules that are easily bypassed with character substitution and deliberate typos. This bot was built to fight back using semantic understanding instead of keyword matching.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Singaporeans lost a record S$1.1 billion to scams in 2024 and S$913.1 million in
 
 # Technical Implementation:
 
-1. `bot.py` (Telegram) or `bot_discord.py` (Discord) scans incoming messages.
+1. `bot_discord.py` scans incoming Discord messages and image attachments.
 2. Incoming text is sent to `moderator.py`, where it is first converted into an embedding (defined in `vector_store.py`).
 3. Input text embedding is then compared with current existing labelled examples to retrieve most similar examples. (Retrieval-Augmented Generation)
 4. Examples and system prompt are in tandem fed to SiliconFlow (`Qwen/Qwen3.5-4B`), which will return a singular classification: `BAN` or `SAFE`.
@@ -32,16 +32,15 @@ Singaporeans lost a record S$1.1 billion to scams in 2024 and S$913.1 million in
 1. **LLM:** SiliconFlow (`Qwen/Qwen2.5-7B-Instruct`)
 2. **Vector Store:** ChromaDB
 3. **Embeddings:** sentence-transformers (`all-MiniLM-L6-v2`)
-4. **Bot Framework:** python-telegram-bot / discord.py
+4. **Bot Framework:** discord.py
 5. **Hosting:** VPS (e.g. Google Cloud e2-micro) + Docker Compose + GHCR
 6. **CI/CD:** GitHub Actions (test → build/push image → SSH deploy)
-7. **Webhooks:** python-telegram-bot built-in + Cloudflare (HTTPS termination; Telegram path)
-8. **Example Sync:** GitHub API
-9. **Observability & Monitoring:** Prometheus (`prometheus_client`) + Grafana Alloy + Grafana Cloud
+7. **Example Sync:** GitHub API
+8. **Observability & Monitoring:** Prometheus (`prometheus_client`) + Grafana Alloy + Grafana Cloud
 
 ## Human-in-the-Loop (HITL) Feedback System
 
-Every time the bot bans a user, admins are presented with two buttons in the group:
+Every time the bot removes suspicious content, admins receive two review buttons by DM:
 
 - **✅ Correct Ban** — confirms the ban and adds the message as a `BAN` example to ChromaDB and `seeds.py`
 - **❌ Wrong Ban** — marks it as a false positive, unbans the user, and adds the message as a `SAFE` example to ChromaDB and `seeds.py`
@@ -50,27 +49,15 @@ This means the bot gets smarter over time with every admin correction, without a
 
 _Credit: This HITL feedback idea was proposed by Dr Mo Yin, a very close and treasured friend of mine. Thank you for the the friendship!_
 
-## /report Command
+## Reporting missed scams
 
 If the bot misses a scam (false negative), it can be manually reported:
 
-- **Admins** — reply to the scam message with `/report`. The user is immediately banned and the message is added to training examples.
-- **Non-admins** — reply with `/report` to flag for admin review. Admins are notified with **✅ Confirm Ban** or **❌ Dismiss** buttons.
+- Use the **Report to SusMessageBot** message context menu, or mention the bot while replying to the suspicious message.
+- **Admins** can immediately remove the message, ban the sender, and add the content to training examples.
+- **Non-admins** submit the message for administrator review through **✅ Confirm Ban** and **❌ Dismiss** buttons.
 
 False negatives are tracked separately in the monitoring dashboard.
-
-## /stats Command
-
-Admins can type `/stats` in any group to get a summary:
-
-- Groups protected
-- Members protected
-- Messages scanned
-- Total bans
-- Accuracy rate (based on human-in-the-loop feedback)
-
-Accuracy is calculated as: confirmed correct classifications / (correct + false positives + false negatives).
-All safe classifications are assumed correct until an admin uses /report to flag a missed scam.
 
 ## Live Monitoring Dashboard
 
@@ -105,8 +92,7 @@ I seek your kind understanding for any teething issues.
 - Add the following to your `.env` file:
   - `SILICONFLOW_API_KEY` — obtain from [cloud.siliconflow.cn](https://cloud.siliconflow.cn)
   - `SILICONFLOW_MODEL` — optional, defaults to `Qwen/Qwen2.5-7B-Instruct`
-  - `DISCORD_BOT_TOKEN` — for Discord; run with `python bot_discord.py` (Telegram token can be left empty)
-  - `TELEGRAM_BOT_TOKEN` — for Telegram; run with `python bot.py` (optional if Discord-only)
+  - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python bot_discord.py`
   - `GITHUB_TOKEN` — GitHub Personal Access Token with `Contents: Read and Write` permission
   - `GITHUB_REPO` — your forked repository (e.g. `yourusername/susmessagebot`)
   - `GITHUB_BRANCH` — branch to sync examples to (e.g. `groq-approach`)
@@ -196,7 +182,6 @@ Running this bot at scale requires paid infrastructure. If this project has been
 
 - ⭐ Star the repo to show support
 - ❤️ [GitHub Sponsors](https://github.com/sponsors/0mgABear)
-- 💬 Reach out via Telegram: @commonertech
 - 📧 Contact: hello@commonertech.dev
 - ☕ [Ko-fi](https://ko-fi.com/commonertech)
 

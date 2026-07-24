@@ -2,7 +2,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import bot
 import bot_discord
 import moderator
 import seeds
@@ -136,83 +135,6 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         ban_user.assert_awaited_once()
 
-    async def test_telegram_text_error_is_sent_for_review_without_strike(self):
-        tracker = StrikeTracker(threshold=3)
-        dm_admins = AsyncMock(return_value=1)
-        context = SimpleNamespace(
-            bot=SimpleNamespace(
-                get_chat_member=AsyncMock(
-                    return_value=SimpleNamespace(status="member")
-                ),
-                get_chat_member_count=AsyncMock(return_value=10),
-                delete_message=AsyncMock(),
-                send_message=AsyncMock(),
-            )
-        )
-        user = SimpleNamespace(id=7, full_name="Test User", username=None)
-        message = SimpleNamespace(
-            text="hello",
-            caption=None,
-            chat_id=1,
-            message_id=1,
-            from_user=user,
-            chat=SimpleNamespace(title="Test Chat"),
-        )
-
-        with (
-            patch.object(bot, "strikes", tracker),
-            patch.object(bot, "classify_message", return_value="REVIEW"),
-            patch.object(bot, "add_group", return_value=False),
-            patch.object(bot, "increment_stat"),
-            patch.object(bot, "get_stat", return_value=0),
-            patch.object(bot, "_tg_dm_admins", dm_admins),
-        ):
-            bot.banned_messages.clear()
-            await bot.handle_message(SimpleNamespace(message=message), context)
-
-        dm_admins.assert_awaited_once()
-        self.assertEqual(tracker.count(1, 7), 0)
-
-    async def test_telegram_blocklisted_url_is_moderated(self):
-        dm_admins = AsyncMock(return_value=1)
-        context = SimpleNamespace(
-            bot=SimpleNamespace(
-                get_chat_member=AsyncMock(
-                    return_value=SimpleNamespace(status="member")
-                ),
-                get_chat_member_count=AsyncMock(return_value=10),
-                delete_message=AsyncMock(),
-                send_message=AsyncMock(),
-            )
-        )
-        user = SimpleNamespace(id=7, full_name="Test User", username=None)
-        message = SimpleNamespace(
-            text="See http://malware.example",
-            caption=None,
-            chat_id=1,
-            message_id=1,
-            from_user=user,
-            chat=SimpleNamespace(title="Test Chat"),
-        )
-
-        with (
-            patch.object(bot, "strikes", StrikeTracker(threshold=3)),
-            patch.object(bot, "classify_message", return_value="SAFE"),
-            patch.object(bot, "analyze_urls", return_value="BAN", create=True),
-            patch.object(bot, "add_group", return_value=False),
-            patch.object(bot, "increment_stat"),
-            patch.object(bot, "get_stat", return_value=0),
-            patch.object(bot, "_tg_dm_admins", dm_admins),
-        ):
-            bot.banned_messages.clear()
-            await bot.handle_message(SimpleNamespace(message=message), context)
-
-        context.bot.delete_message.assert_awaited_once_with(
-            chat_id=1,
-            message_id=1,
-        )
-        dm_admins.assert_awaited_once()
-
 
 class DiscordHealthRegressionTests(unittest.TestCase):
     class _FakeHealthHandler(bot_discord.HealthHandler):
@@ -332,89 +254,7 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
         register.assert_called_once()
 
 
-class TelegramCallbackRegressionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_old_correct_callback_uses_stored_user_id(self):
-        query = SimpleNamespace(
-            from_user=SimpleNamespace(id=10),
-            data="correct|1|100",
-            answer=AsyncMock(),
-            edit_message_text=AsyncMock(),
-        )
-        context = SimpleNamespace(
-            bot=SimpleNamespace(
-                get_chat_member=AsyncMock(
-                    return_value=SimpleNamespace(
-                        status=bot.ChatMemberStatus.ADMINISTRATOR
-                    )
-                )
-            )
-        )
-        execute_ban = AsyncMock()
-
-        with (
-            patch.object(bot, "_tg_execute_ban", execute_ban),
-            patch.object(bot, "increment_stat"),
-            patch.object(bot, "get_stat", return_value=0),
-            patch.object(bot, "sync_example_to_github"),
-            patch("vector_store.add_example"),
-        ):
-            bot.banned_messages.clear()
-            bot.banned_messages[1] = {"user_id": 7, "text": "scam"}
-            await bot.handle_callback(
-                SimpleNamespace(callback_query=query),
-                context,
-            )
-
-        execute_ban.assert_awaited_once_with(context.bot, 100, 7)
-
-
-class StrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_telegram_does_not_autoban_when_no_admin_can_review(self):
-        context = SimpleNamespace(
-            bot=SimpleNamespace(
-                get_chat_member=AsyncMock(
-                    return_value=SimpleNamespace(status="member")
-                ),
-                get_chat_member_count=AsyncMock(return_value=10),
-                delete_message=AsyncMock(),
-                send_message=AsyncMock(),
-            )
-        )
-        execute_ban = AsyncMock()
-
-        with (
-            patch.object(bot, "strikes", StrikeTracker(threshold=3)),
-            patch.object(bot, "classify_message", return_value="BAN"),
-            patch.object(bot, "add_group", return_value=False),
-            patch.object(bot, "increment_stat"),
-            patch.object(bot, "get_stat", return_value=0),
-            patch.object(bot, "_tg_dm_admins", AsyncMock(return_value=0)),
-            patch.object(bot, "_tg_execute_ban", execute_ban),
-            patch.object(bot, "sync_example_to_github"),
-            patch("vector_store.add_example"),
-        ):
-            bot.banned_messages.clear()
-            for message_id in range(1, 4):
-                user = SimpleNamespace(
-                    id=7,
-                    full_name="Test User",
-                    username=None,
-                )
-                message = SimpleNamespace(
-                    text="scam",
-                    caption=None,
-                    chat_id=1,
-                    message_id=message_id,
-                    from_user=user,
-                    chat=SimpleNamespace(title="Test Chat"),
-                )
-                await bot.handle_message(
-                    SimpleNamespace(message=message),
-                    context,
-                )
-
-        execute_ban.assert_not_awaited()
-
+class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_discord_does_not_autoban_when_no_admin_can_review(self):
         execute_ban = AsyncMock()
         author = SimpleNamespace(id=7)
