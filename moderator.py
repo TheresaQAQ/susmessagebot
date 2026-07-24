@@ -1,109 +1,177 @@
-from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
+import base64
+import io
+import logging
+import os
+import re
+
+from openai import OpenAI
+from PIL import Image
+
+from config import (
+    SILICONFLOW_API_KEY,
+    SILICONFLOW_BASE_URL,
+    SILICONFLOW_MODEL,
+)
+from prompt_loader import DEFAULT_PROMPT_ID, render_prompt
 from vector_store import get_similar_examples
 
-client = Groq(api_key=GROQ_API_KEY)
+client = OpenAI(
+    api_key=SILICONFLOW_API_KEY,
+    base_url=SILICONFLOW_BASE_URL,
+    timeout=60.0,
+)
+
+PROMPT_ID = os.getenv("PROMPT_ID", DEFAULT_PROMPT_ID)
+_IMAGE_MAX_SIDE = 1568
+
+
+def _parse_verdict(content: str, prefer_last: bool = False) -> str:
+    text = (content or "").strip().upper()
+    if text in {"SAFE", "BAN"}:
+        return text
+    decided = list(re.finditer(
+        r"(?:CLASSIFIED AS|CLASSIFICATION IS|SHOULD BE CLASSIFIED AS|ANSWER(?: SHOULD BE)?|FINAL(?: ANSWER)?|VERDICT|输出|判定)\s*[:=]?\s*(BAN|SAFE)",
+        text,
+    ))
+    if decided:
+        return decided[-1].group(1)
+    matches = list(re.finditer(r"\b(BAN|SAFE)\b", text))
+    if not matches:
+        return "SAFE"
+    return matches[-1].group(1) if prefer_last else matches[0].group(1)
+
+
+def _should_disable_thinking() -> bool:
+    return (
+        "Qwen3" in SILICONFLOW_MODEL
+        or "GLM-4.5" in SILICONFLOW_MODEL
+        or "GLM-4.6" in SILICONFLOW_MODEL
+        or "GLM-4.7" in SILICONFLOW_MODEL
+        or "DeepSeek-V3" in SILICONFLOW_MODEL
+    )
+
+
+def _verdict_from_response(response) -> tuple[str, str, str]:
+    message_obj = response.choices[0].message
+    content = message_obj.content or ""
+    reasoning = (
+        getattr(message_obj, "reasoning_content", None)
+        or getattr(message_obj, "reasoning", None)
+        or ""
+    )
+    result = _parse_verdict(content)
+    if not content.strip() and reasoning:
+        result = _parse_verdict(reasoning, prefer_last=True)
+    return result, content, reasoning
+
+
+def _image_to_data_url(image_bytes: bytes) -> str:
+    """Normalize attachment bytes into a JPEG data URL for vision APIs."""
+    img = Image.open(io.BytesIO(image_bytes))
+    if getattr(img, "n_frames", 1) > 1:
+        img.seek(0)
+    img = img.convert("RGB")
+
+    w, h = img.size
+    longest = max(w, h)
+    if longest > _IMAGE_MAX_SIDE:
+        scale = _IMAGE_MAX_SIDE / longest
+        img = img.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.Resampling.LANCZOS,
+        )
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85, optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
+
 
 def classify_message(message: str) -> str:
     """
-    Classifies a Telegram message as SAFE or BAN.
-    
-    Args:
-        message: The text content of the Telegram message
-        
-    Returns:
-        "BAN" if the message is a scam/spam, "SAFE" otherwise
+    Classifies a Discord/Telegram message as SAFE, BAN, or REVIEW.
+
+    REVIEW means classification failed and the message requires manual review.
     """
-    examples = get_similar_examples(message)
-    system_prompt = """
+    try:
+        examples = get_similar_examples(message)
+        system_prompt = render_prompt(PROMPT_ID, examples)
 
-    ## Role 
-    You are a moderator for Telegram group chats.
+        create_kwargs = {
+            "model": SILICONFLOW_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"<message>{message}</message>"},
+            ],
+            "max_tokens": 64,
+            "temperature": 0,
+        }
+        if _should_disable_thinking():
+            create_kwargs["extra_body"] = {"enable_thinking": False}
 
-    ## Task
-    Classify each message as either SAFE or BAN. Respond with exactly one word: SAFE or BAN. No explanation, punctuation, or additional text.
+        response = client.chat.completions.create(**create_kwargs)
+        result, content, reasoning = _verdict_from_response(response)
+        logging.info(
+            "classify_message prompt=%s model=%s raw=%r reasoning_tail=%r verdict=%s",
+            PROMPT_ID,
+            SILICONFLOW_MODEL,
+            content[:80],
+            str(reasoning)[-120:],
+            result,
+        )
+        return result
+    except Exception as e:
+        logging.error("Text classification error: %s", e)
+        return "REVIEW"
 
-    ## Decision Principle
-    Default to SAFE. Only classify as BAN when you are highly confident the message is malicious. A false positive (banning a legitimate user) is worse than a false negative (missing a scammer).
 
-    ## BAN Categories
-    Classify as BAN only if the message clearly falls into one or more of these categories:
-    
-    **Financial scams**
-    - Fake giveaways or prize announcements (e.g. "You have been selected to receive...")
-    - Guaranteed investment returns or passive income schemes
-    - Pump-and-dump crypto schemes or fake trading signals
-    - Advance fee fraud (e.g. "Send $50 to unlock your $5,000 reward")
-
-    **Sexual content**
-    - Pornographic content or explicit sexual solicitation
-    - Links to adult content platforms or OnlyFans solicitation
-    - Soliciting intimate images or services for payment
-    - Tagging a username that is suggestive, promoting sexual services and/or content.
-
-    **Spam and advertising**
-    - Unsolicited mass advertising with no relevance to the group (e.g. promotion of marketing for crypto groups)
-    - Repeated promotional messages for commercial services
-    - Bulk messaging patterns (e.g. lists of phone numbers, country codes for sale)
-
-    **Academic dishonesty**
-    - Assignment completion services, homework for hire
-    - Exam cheating services, paid coursework
-
-    **Filter evasion**
-    - Deliberate character substitution to evade keyword filters (e.g. "fr33", "stiII", "v!agra", "gi ving away")
-    - Intentional word splitting to bypass detection (e.g. "give a way", "bit co in")
-    - Note: Distinguish between evasion attempts and natural typos. Evasion involves systematic substitution of specific characters, usually in combination with other suspicious content.
-
-    **Suspicious links**
-    - Links to unknown domains promising rewards, prizes, jobs, or services
-    - Phishing links disguised as legitimate platforms
-    - URL shorteners leading to suspicious destinations
-
-    ## SAFE Categories
-    The following must always be classified as SAFE, even if they seem unusual:
-
-    **Normal conversation**
-    - Any genuine discussion, question, or opinion on any topic (politics, health, finance, technology, relationships)
-    - Venting, complaints, debates, or arguments between members
-    - Satire, sarcasm, humour, and memes
-    - Messages containing profanity or strong language without malicious intent
-
-    **Legitimate posts**
-    - Lost and found announcements
-    - Genuine job or recruitment posts, even if they mention blockchain, AI, crypto, or remote work
-    - Community announcements or event sharing
-    - Personal sharing (achievements, life updates, news)
-
-    **Legitimate links**
-    - Well-known platforms: github.com, youtube.com, google.com, linkedin.com, reddit.com, twitter.com, instagram.com, facebook.com, tiktok.com, news sites, government sites
-    - Links shared in the context of a genuine discussion
-
-    **Natural language patterns**
-    - Common typos and autocorrect errors (e.g. "teh", "wiht", "ur", "u", "gonna", "wanna")
-    - Local slang, dialect, or code-switching (e.g. Singlish: "lah", "lor", "sia", "bro")
-    - Occasional repeating of letters (e.g. "frfr", "yeaa", "ikik")
-    - Abbreviations common in casual texting (e.g. "tbh", "imo", "lol", "omg", "ngl")
-    - Possible representation of emojis in text (e.g. ":)", ":D")
-    - Tone indicators commonly used online (e.g. "/j" for joking, "/s" for sarcasm, "/hj" for half-joking)
-    - Informal grammar and punctuation
-
-    ## Examples
-    {examples}
-
-    ## Output Format
-    Respond with exactly one word: SAFE or BAN
+def classify_image(image_bytes: bytes) -> str:
     """
+    Classify an image attachment via multimodal LLM (no OCR).
+    Return REVIEW on errors so callers can request manual moderation.
+    """
+    try:
+        data_url = _image_to_data_url(image_bytes)
+        # No text for RAG; keep the same rules prompt with empty examples.
+        system_prompt = render_prompt(PROMPT_ID, "")
+        create_kwargs = {
+            "model": SILICONFLOW_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "请审核这张社区图片（可能含文字、二维码、广告版式或引流视觉）。"
+                                "按系统规则判定意图。只输出 SAFE 或 BAN。"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        },
+                    ],
+                },
+            ],
+            "max_tokens": 64,
+            "temperature": 0,
+        }
+        if _should_disable_thinking():
+            create_kwargs["extra_body"] = {"enable_thinking": False}
 
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt.format(examples=examples)},
-            {"role": "user", "content": f"<message>{message}</message>"}
-        ]
-    )
-
-    result = response.choices[0].message.content.strip().upper()
-    if result not in ["SAFE", "BAN"]:
-        return "SAFE"
-    return result
+        response = client.chat.completions.create(**create_kwargs)
+        result, content, reasoning = _verdict_from_response(response)
+        logging.info(
+            "classify_image prompt=%s model=%s raw=%r reasoning_tail=%r verdict=%s",
+            PROMPT_ID,
+            SILICONFLOW_MODEL,
+            content[:80],
+            str(reasoning)[-120:],
+            result,
+        )
+        return result
+    except Exception as e:
+        logging.error("Image classification error: %s", e)
+        return "REVIEW"

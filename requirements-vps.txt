@@ -1,8 +1,11 @@
 python-telegram-bot[webhooks,job-queue]
-groq
+openai
 chromadb
 sentence-transformers
 python-dotenv
 pysqlite3-binary; sys_platform == "linux"
 requests
 prometheus_client
+discord.py
+Pillow
+pytesseract

@@ -14,7 +14,7 @@ examples = [
     ("https://github.com/0mgABear/susmessagebot", "SAFE"),
     ("Looking for 1–3 people for remote earnings . Everything can be done from your phone. Income — €1,500 per week. Message 👉 @realewan", "BAN"),
     ('i can send it if u want?', "SAFE"),
-    ("We are looking for reliable partners for long-term collaboration!\nNo risks or shady deals!\nEarn between $1400 and 1600$ per week\nConsistent income—can also be done remotely!\n\nIf you're interested, contact @Anna_Lour", "BAN")
+    ("We are looking for reliable partners for long-term collaboration!\nNo risks or shady deals!\nEarn between $1400 and 1600$ per week\nConsistent income—can also be done remotely!\n\nIf you're interested, contact @Anna_Lour", "BAN"),
     ('i can send that message too and see if my bot bans me haha', "SAFE"),
     ("I am offering you a wide range of services like finding valid business emails and targeted b2b LinkedIn lead generation by sales navigator. I am excellent at providing clean, bounce-free, Geo-targeted leads based on your targeted market.\n\n\n\nI am an expert in:\n\n\n\nB2B Lead Generation\nLinkedin Lead Generation\nB2B targeted emails\nValid Emails\nData Collection and Research\nWeb research\nWeb Scrapping\nData Entry\nCoinbase leads\nSweepstakes leads\nGambler leads\nForex leads\nCrypto leads\nTrading leads\nB2c leads\nLead generation \n\n\nMy tools and resources:\n\nLinkedin sales navigator\nE-mail Finder & Verification Tools \nGoogle Advanced Search \nZoominfo, Yellow Page, Crunchbase, AngelList, Yelp\nCompany Website, and so on.\n\n\nHere's what I need from you:\n\nTargeted Industries\nTargeted Locations\nTargeted contact titles\nTargeted employee size(if needed)\n\n\nWhy you should appoint me.!\n\n\n\nFast response\n100% accuracy\nReplacement for invalid leads\n24/7 support\n\nDrop message \n@Creative_Lead_MWC\n@rpaexpert\nhttps://wa.me/+923710042488", "BAN"),
     ('Australia 🇦🇺 | Canada 🇨🇦 | UK | Denmark 🇩🇰 | 🇬🇧USA 🇺🇸 + Toll Free and Local Number is available\n\n𝗦𝗜𝗣 𝗧𝗿𝘂𝗻𝗸𝘀 & 𝗗𝗜𝗗𝘀 – 𝗥𝗲𝗮𝗱𝘆\n 𝗜𝗻𝘀𝘁𝗮𝗻𝘁 𝗔𝗰𝘁𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗼𝗻 𝗩𝗲𝗿𝗶𝗳𝗶𝗲𝗱 𝗥𝗼𝘂𝘁𝗲𝘀 \n\nUp to 20 channels \n🛎️ message me now to get yours\n@Cloudcallvoip', "BAN"),
@@ -60,10 +60,7 @@ examples = [
     ('contact @Kulwinder_kaur_Gill_company for jobs (testing)', "BAN"),
     ('enough sg? @ra_cy7', "BAN"),
     ('Earn $5000 a week working from home! DM me now for details', "BAN"),
-    ('', "BAN"),
     ('Check this out: http://malware.wicar.org', "BAN"),
-    ('hihi this is legit message', "BAN"),
-    ('final test', "BAN"),
 ]
 
 

@@ -19,7 +19,10 @@ filelock==3.25.2
 flatbuffers==25.12.19
 fsspec==2026.2.0
 googleapis-common-protos==1.73.1
-groq==1.1.2
+openai==2.26.0
+discord.py==2.7.1
+Pillow==12.3.0
+pytesseract==0.3.13
 grpcio==1.78.0
 h11==0.16.0
 hf-xet==1.4.2
