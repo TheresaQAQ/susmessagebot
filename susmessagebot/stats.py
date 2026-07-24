@@ -104,6 +104,41 @@ def get_review_decision(
     return row[0] if row else None
 
 
+def release_review_decision(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    decision: str,
+    decided_by: int,
+) -> bool:
+    """
+    Release a claim so a failed review action can be retried.
+
+    Only deletes the row when decision and decided_by still match the claim.
+    """
+    key = review_key(guild_id, message_id, user_id)
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.execute(
+                """
+                DELETE FROM review_decisions
+                WHERE review_key = ? AND decision = ? AND decided_by = ?
+                """,
+                (key, decision, decided_by),
+            )
+            deleted = cursor.rowcount > 0
+            conn.execute("COMMIT")
+            return deleted
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
 def init_strikes_table():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

@@ -496,6 +496,23 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _admin_interaction(guild, *, user_id=11, content="📝 Content:\nscam text"):
+        return SimpleNamespace(
+            client=SimpleNamespace(
+                get_guild=MagicMock(return_value=guild),
+                fetch_user=AsyncMock(return_value=SimpleNamespace(id=7)),
+            ),
+            user=SimpleNamespace(id=user_id),
+            response=SimpleNamespace(
+                send_message=AsyncMock(),
+                edit_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            edit_original_response=AsyncMock(),
+            message=SimpleNamespace(content=content),
+        )
+
     async def test_second_admin_decision_is_rejected(self):
         old_db_path = stats.DB_PATH
         try:
@@ -528,17 +545,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                         )
                     ),
                 )
-                interaction = SimpleNamespace(
-                    client=SimpleNamespace(get_guild=MagicMock(return_value=guild)),
-                    user=SimpleNamespace(id=11),
-                    response=SimpleNamespace(
-                        send_message=AsyncMock(),
-                        edit_message=AsyncMock(),
-                    ),
-                    message=SimpleNamespace(
-                        content="📝 Content:\nscam text",
-                    ),
-                )
+                interaction = self._admin_interaction(guild)
                 button = bot_discord.HITLBanButton(
                     guild_id=1,
                     user_id=7,
@@ -562,6 +569,99 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 add_example.assert_not_called()
                 sync.assert_not_called()
                 execute_ban.assert_not_awaited()
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_false_alarm_unbans_auto_banned_user(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                tracker = StrikeTracker(threshold=3, db_path=db.name)
+                tracker.record(1, 7)
+                tracker.record(1, 7)
+
+                guild = SimpleNamespace(
+                    id=1,
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    unban=AsyncMock(),
+                )
+                interaction = self._admin_interaction(guild)
+                button = bot_discord.HITLFalseAlarmButton(1, 7, 42, 9)
+
+                with (
+                    patch.object(bot_discord, "strikes", tracker),
+                    patch.object(bot_discord, "add_example"),
+                    patch.object(bot_discord, "sync_example_to_github"),
+                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "get_stat", return_value=1),
+                ):
+                    await button.callback(interaction)
+
+                guild.unban.assert_awaited_once()
+                self.assertEqual(tracker.count(1, 7), 0)
+                interaction.response.defer.assert_awaited_once()
+                body = interaction.edit_original_response.await_args.kwargs["content"]
+                self.assertIn("User unbanned", body)
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_failed_hitl_side_effects_release_claim_for_retry(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+
+                guild = SimpleNamespace(
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    get_channel=MagicMock(return_value=None),
+                )
+                interaction = self._admin_interaction(guild)
+                button = bot_discord.HITLBanButton(1, 7, 42, 9)
+
+                with (
+                    patch.object(bot_discord, "add_example"),
+                    patch.object(
+                        bot_discord,
+                        "sync_example_to_github",
+                        side_effect=RuntimeError("github down"),
+                    ),
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
+                ):
+                    await button.callback(interaction)
+
+                self.assertIsNone(stats.get_review_decision(1, 42, 7))
+                execute_ban.assert_not_awaited()
+                body = interaction.edit_original_response.await_args.kwargs["content"]
+                self.assertIn("try again", body.lower())
+
+                interaction2 = self._admin_interaction(guild)
+                with (
+                    patch.object(bot_discord, "add_example") as add_example,
+                    patch.object(bot_discord, "sync_example_to_github"),
+                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "get_stat", return_value=1),
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban2,
+                ):
+                    await button.callback(interaction2)
+
+                add_example.assert_called_once_with("scam text", "BAN")
+                execute_ban2.assert_awaited_once()
+                self.assertEqual(stats.get_review_decision(1, 42, 7), "ban")
         finally:
             stats.DB_PATH = old_db_path
 

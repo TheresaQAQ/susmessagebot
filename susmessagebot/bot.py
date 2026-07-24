@@ -26,6 +26,7 @@ from .stats import (
     get_groups_count,
     get_total_members,
     claim_review_decision,
+    release_review_decision,
 )
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -579,6 +580,34 @@ async def _claim_or_reject_review(
     return False
 
 
+def _release_review_claim(
+    *,
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    decision: str,
+    decided_by: int,
+) -> None:
+    try:
+        release_review_decision(
+            guild_id,
+            message_id,
+            user_id,
+            decision,
+            decided_by,
+        )
+    except Exception as e:
+        logging.error(f"Failed to release review claim: {e}")
+
+
+async def _edit_review_message(
+    interaction: discord.Interaction,
+    content: str,
+) -> None:
+    """Edit the review DM after the interaction has been deferred."""
+    await interaction.edit_original_response(content=content, view=None)
+
+
 async def _require_interaction_admin(
     interaction: discord.Interaction,
     guild_id: int,
@@ -673,10 +702,26 @@ class HITLBanButton(
             decision="ban",
         ):
             return
-        add_example(text, "BAN")
-        sync_example_to_github(text, "BAN")
-        increment_stat('bans_confirmed')
-        BANS_CONFIRMED.set(get_stat('bans_confirmed'))
+        await interaction.response.defer()
+        try:
+            add_example(text, "BAN")
+            sync_example_to_github(text, "BAN")
+            increment_stat('bans_confirmed')
+            BANS_CONFIRMED.set(get_stat('bans_confirmed'))
+        except Exception as e:
+            logging.error(f"Error recording ban decision: {e}")
+            _release_review_claim(
+                guild_id=self.guild_id,
+                message_id=self.message_id,
+                user_id=self.user_id,
+                decision="ban",
+                decided_by=interaction.user.id,
+            )
+            await _edit_review_message(
+                interaction,
+                "⚠️ Failed to record decision. Please try again.",
+            )
+            return
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
@@ -691,15 +736,12 @@ class HITLBanButton(
                 user=user,
                 reason="Confirmed by admin",
             )
-            await interaction.response.edit_message(
-                content="🚫 User banned.",
-                view=None,
-            )
+            await _edit_review_message(interaction, "🚫 User banned.")
         except Exception as e:
             logging.error(f"Error banning user: {e}")
-            await interaction.response.edit_message(
-                content="✅ Added to training. Could not ban user — they may have already left.",
-                view=None,
+            await _edit_review_message(
+                interaction,
+                "✅ Added to training. Could not ban user — they may have already left.",
             )
 
 
@@ -742,7 +784,8 @@ class HITLFalseAlarmButton(
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not await _require_interaction_admin(interaction, self.guild_id):
+        guild = await _require_interaction_admin(interaction, self.guild_id)
+        if not guild:
             return
         text = _interaction_review_text(interaction)
         if not text:
@@ -759,14 +802,48 @@ class HITLFalseAlarmButton(
             decision="false_alarm",
         ):
             return
-        add_example(text, "SAFE")
-        sync_example_to_github(text, "SAFE")
-        increment_stat('false_positives')
-        FALSE_POSITIVES.set(get_stat('false_positives'))
-        strikes.clear(self.guild_id, self.user_id)
-        await interaction.response.edit_message(
-            content="❌ False alarm. No ban applied.",
-            view=None,
+        await interaction.response.defer()
+        try:
+            add_example(text, "SAFE")
+            sync_example_to_github(text, "SAFE")
+            increment_stat('false_positives')
+            FALSE_POSITIVES.set(get_stat('false_positives'))
+            strikes.clear(self.guild_id, self.user_id)
+        except Exception as e:
+            logging.error(f"Error recording false-alarm decision: {e}")
+            _release_review_claim(
+                guild_id=self.guild_id,
+                message_id=self.message_id,
+                user_id=self.user_id,
+                decision="false_alarm",
+                decided_by=interaction.user.id,
+            )
+            await _edit_review_message(
+                interaction,
+                "⚠️ Failed to record decision. Please try again.",
+            )
+            return
+
+        unban_note = "No active ban to reverse."
+        try:
+            await guild.unban(
+                discord.Object(id=self.user_id),
+                reason="False alarm confirmed",
+            )
+            unban_note = "User unbanned."
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            logging.warning(
+                "Could not unban user %s after false alarm: %s",
+                self.user_id,
+                e,
+            )
+            unban_note = "Could not unban automatically."
+
+        await _edit_review_message(
+            interaction,
+            f"❌ False alarm. {unban_note} Strikes cleared.",
         )
 
 
@@ -904,30 +981,49 @@ class ReportConfirmButton(
             decision="ban",
         ):
             return
-        add_example(text, "BAN")
-        sync_example_to_github(text, "BAN")
-        increment_stat('false_negatives')
-        FALSE_NEGATIVES.set(get_stat('false_negatives'))
+        await interaction.response.defer()
+        try:
+            add_example(text, "BAN")
+            sync_example_to_github(text, "BAN")
+            increment_stat('false_negatives')
+            FALSE_NEGATIVES.set(get_stat('false_negatives'))
+        except Exception as e:
+            logging.error(f"Error recording report ban decision: {e}")
+            _release_review_claim(
+                guild_id=self.guild_id,
+                message_id=self.message_id,
+                user_id=self.user_id,
+                decision="ban",
+                decided_by=interaction.user.id,
+            )
+            await _edit_review_message(
+                interaction,
+                "⚠️ Failed to record decision. Please try again.",
+            )
+            return
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
-                msg = await channel.fetch_message(self.message_id)
-                await msg.delete()
+                try:
+                    msg = await channel.fetch_message(self.message_id)
+                    await msg.delete()
+                except Exception:
+                    pass
             user = await interaction.client.fetch_user(self.user_id)
             await _execute_ban(
                 guild=guild,
                 user=user,
                 reason="Confirmed by admin",
             )
-            await interaction.response.edit_message(
-                content="✅ Report confirmed. User banned.",
-                view=None,
+            await _edit_review_message(
+                interaction,
+                "✅ Report confirmed. User banned.",
             )
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
-            await interaction.response.edit_message(
-                content="✅ Could not ban user — they may have already left.",
-                view=None,
+            await _edit_review_message(
+                interaction,
+                "✅ Could not ban user — they may have already left.",
             )
 
 
@@ -980,10 +1076,8 @@ class ReportDismissButton(
             decision="dismiss",
         ):
             return
-        await interaction.response.edit_message(
-            content="❌ Report dismissed.",
-            view=None,
-        )
+        await interaction.response.defer()
+        await _edit_review_message(interaction, "❌ Report dismissed.")
 
 
 class ReportReviewView(discord.ui.View):
