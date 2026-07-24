@@ -142,13 +142,18 @@ jobs:
           script: |
             set -euo pipefail
 
+            # VPS has Docker Engine only (no docker compose / docker-compose CLI).
+            # Other stacks are managed by Portainer; this deploy uses plain docker.
             APP_DIR="/opt/susmessagebot"
             COMPOSE_FILE="${APP_DIR}/compose.yaml"
             ENV_FILE="/opt/susmessagebot-secrets/.env"
+            CONTAINER_NAME="susmessagebot"
+            VOLUME_NAME="susmessagebot_data"
+
             sudo mkdir -p "$APP_DIR"
 
-            # Install runtime configuration sent by Actions. The VPS never
-            # clones or pulls the source repository.
+            # Keep compose.yaml on disk for documentation / optional Portainer import.
+            # Runtime deploy does not invoke Compose.
             printf '%s' "${COMPOSE_B64}" \
               | base64 --decode \
               | sudo tee "${COMPOSE_FILE}.tmp" >/dev/null
@@ -166,11 +171,6 @@ jobs:
               sudo systemctl disable susmessagebot || true
             fi
 
-            compose() {
-              sudo env IMAGE="${IMAGE}" \
-                docker compose -p susmessagebot -f "$COMPOSE_FILE" "$@"
-            }
-
             wait_for_healthy() {
               local expected_image="$1"
               local phase="$2"
@@ -179,8 +179,8 @@ jobs:
 
               echo "Waiting for ${phase} container health..."
               for i in $(seq 1 36); do
-                status="$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' susmessagebot 2>/dev/null || echo missing)"
-                running_image="$(sudo docker inspect -f '{{.Config.Image}}' susmessagebot 2>/dev/null || echo missing)"
+                status="$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo missing)"
+                running_image="$(sudo docker inspect -f '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo missing)"
                 if [ "${status}" = "healthy" ] && [ "${running_image}" = "${expected_image}" ]; then
                   echo "${phase} healthy with ${expected_image}"
                   return 0
@@ -199,30 +199,57 @@ jobs:
               return 1
             }
 
-            PREVIOUS_IMAGE="$(sudo docker inspect -f '{{.Config.Image}}' susmessagebot 2>/dev/null || true)"
+            run_container() {
+              local image="$1"
+
+              sudo docker volume create "${VOLUME_NAME}" >/dev/null
+              sudo docker pull "${image}"
+              sudo docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+              sudo docker run -d \
+                --name "${CONTAINER_NAME}" \
+                --restart unless-stopped \
+                --env-file "${ENV_FILE}" \
+                -e DATA_DIR=/app/data \
+                -e HEALTH_PORT=8001 \
+                -e METRICS_PORT=8000 \
+                -e TOKENIZERS_PARALLELISM=false \
+                -e HF_HUB_DISABLE_IMPLICIT_TOKEN=1 \
+                -v "${VOLUME_NAME}:/app/data" \
+                -p 127.0.0.1:8000:8000 \
+                -p 127.0.0.1:8001:8001 \
+                --health-cmd='curl -fsS http://127.0.0.1:8001/health || exit 1' \
+                --health-interval=30s \
+                --health-timeout=5s \
+                --health-retries=3 \
+                --health-start-period=90s \
+                --log-driver=json-file \
+                --log-opt max-size=10m \
+                --log-opt max-file=3 \
+                "${image}"
+            }
+
+            PREVIOUS_IMAGE="$(sudo docker inspect -f '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
 
             echo "${GHCR_READ_TOKEN}" \
               | sudo docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
-            export IMAGE="${IMAGE}"
-            if compose pull \
-              && compose up -d --remove-orphans \
+
+            if run_container "${IMAGE}" \
               && wait_for_healthy "${IMAGE}" "Deploy"; then
               sudo docker logout ghcr.io >/dev/null 2>&1 || true
               exit 0
             fi
 
             echo "Deploy failed; dumping logs"
-            compose logs --tail=200 || true
+            sudo docker logs --tail=200 "${CONTAINER_NAME}" 2>&1 || true
 
             if [ -n "${PREVIOUS_IMAGE}" ] && [ "${PREVIOUS_IMAGE}" != "${IMAGE}" ]; then
               echo "Rolling back to ${PREVIOUS_IMAGE}"
-              export IMAGE="${PREVIOUS_IMAGE}"
-              if compose up -d --remove-orphans \
+              if run_container "${PREVIOUS_IMAGE}" \
                 && wait_for_healthy "${PREVIOUS_IMAGE}" "Rollback"; then
                 echo "Rollback completed successfully"
               else
                 echo "Rollback failed; production is not confirmed healthy"
-                compose logs --tail=200 || true
+                sudo docker logs --tail=200 "${CONTAINER_NAME}" 2>&1 || true
               fi
             else
               echo "No distinct previous image is available for rollback"

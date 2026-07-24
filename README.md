@@ -38,7 +38,7 @@ tests/          Regression tests
 2. **Vector Store:** ChromaDB
 3. **Embeddings:** sentence-transformers (`all-MiniLM-L6-v2`)
 4. **Bot Framework:** discord.py
-5. **Hosting:** VPS (e.g. Google Cloud e2-micro) + Docker Compose + GHCR
+5. **Hosting:** VPS + Docker Engine + GHCR（生产机无 Compose CLI，CD 使用 `docker run`）
 6. **CI/CD:** GitHub Actions (test → build/push image → SSH deploy)
 7. **Example Sync:** GitHub API
 8. **Observability & Monitoring:** Prometheus (`prometheus_client`) + Grafana Alloy + Grafana Cloud
@@ -108,8 +108,8 @@ Production path for `main`:
 
 1. GitHub Actions runs unit tests on every PR / push.
 2. On push, Actions builds `ghcr.io/<owner>/susmessagebot:<git-sha>` (CPU PyTorch wheel; no CUDA) and pushes to GHCR.
-3. Actions sends the runtime `compose.yaml` over SSH; the VPS does not clone the source repository.
-4. The VPS pulls that exact image and restarts Docker Compose.
+3. Actions sends the runtime `compose.yaml` over SSH（仅作配置备份 / 可选 Portainer 导入）；VPS 不 clone 源码仓库。
+4. VPS 用裸 `docker pull` + `docker run` 拉起精确 SHA 镜像（适配无 Compose 插件环境）。
 5. Deploy waits until `http://127.0.0.1:8001/health` reports Discord readiness; on failure it rolls back to the previous image.
 
 Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`, …) stay on the VPS in `/opt/susmessagebot-secrets/.env` and are **not** stored as GitHub Actions secrets. The bot's secrets are isolated from FeedLink.
@@ -127,7 +127,7 @@ Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`,
 ### VPS first-time setup
 
 ```bash
-# Install Docker Engine + Compose plugin, then:
+# Docker Engine is enough (Compose CLI not required). Then:
 sudo mkdir -p /opt/susmessagebot-secrets
 sudo touch /opt/susmessagebot-secrets/.env
 sudo chmod 700 /opt/susmessagebot-secrets
@@ -146,7 +146,7 @@ sudo nano /opt/susmessagebot-secrets/.env
 # compose.yaml, pulls the image, and starts the service.
 ```
 
-The runtime Compose file is installed at `/opt/susmessagebot/compose.yaml`. Persistent runtime data lives in the independent Docker volume `susmessagebot_data` (`/var/lib/docker/volumes/susmessagebot_data/_data`) and does not share FeedLink volumes. Back it up before risky changes:
+`compose.yaml` 会同步到 `/opt/susmessagebot/compose.yaml`（文档/可选导入用）。运行时数据在独立 volume `susmessagebot_data`，不与 FeedLink 共享。备份：
 
 ```bash
 sudo mkdir -p /var/backups/susmessagebot
@@ -157,10 +157,18 @@ sudo tar -czf "/var/backups/susmessagebot/data-$(date +%F).tar.gz" \
 ### Manual rollback
 
 ```bash
-sudo env IMAGE=ghcr.io/<owner>/susmessagebot:<previous-sha> \
-  docker compose -p susmessagebot -f /opt/susmessagebot/compose.yaml pull
-sudo env IMAGE=ghcr.io/<owner>/susmessagebot:<previous-sha> \
-  docker compose -p susmessagebot -f /opt/susmessagebot/compose.yaml up -d
+IMAGE=ghcr.io/<owner>/susmessagebot:<previous-sha>
+sudo docker pull "$IMAGE"
+sudo docker rm -f susmessagebot
+sudo docker run -d --name susmessagebot --restart unless-stopped \
+  --env-file /opt/susmessagebot-secrets/.env \
+  -e DATA_DIR=/app/data -e HEALTH_PORT=8001 -e METRICS_PORT=8000 \
+  -v susmessagebot_data:/app/data \
+  -p 127.0.0.1:8000:8000 -p 127.0.0.1:8001:8001 \
+  --health-cmd='curl -fsS http://127.0.0.1:8001/health || exit 1' \
+  --health-interval=30s --health-timeout=5s --health-retries=3 \
+  --health-start-period=90s \
+  "$IMAGE"
 ```
 
 ### Local Discord run (without Docker)
