@@ -455,7 +455,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(kwargs["removed"])
         self.assertEqual(kwargs["message_id"], 42)
         self.assertEqual(kwargs["channel_id"], 9)
-        self.assertIn("not removed", kwargs["status"])
+        self.assertIn("消息未删除", kwargs["status"])
 
     async def test_discord_uses_image_content_type_without_file_extension(self):
         attachment = SimpleNamespace(
