@@ -1,7 +1,7 @@
 .PHONY: dev start
 
 dev:
-	uv run python bot_discord.py
+	uv run python -m susmessagebot.bot
 
 start:
-	uv run python bot_discord.py
+	uv run python -m susmessagebot.bot

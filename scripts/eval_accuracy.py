@@ -2,10 +2,10 @@
 Evaluate classify_message on gold-labeled game-community samples.
 
 Usage:
-  python eval_accuracy.py --prompt-version v2_zh_balanced --run 1
-  python eval_accuracy.py --prompt-version v2_zh_balanced --run 1 --limit 20
-  python eval_accuracy.py --prompt-version v2_zh_balanced --run 1 --resume
-  python eval_accuracy.py --prompt-version v2_zh_balanced --run 1 --model Qwen/Qwen3-8B
+  python -m scripts.eval_accuracy --prompt-version v2_zh_balanced --run 1
+  python -m scripts.eval_accuracy --prompt-version v2_zh_balanced --run 1 --limit 20
+  python -m scripts.eval_accuracy --prompt-version v2_zh_balanced --run 1 --resume
+  python -m scripts.eval_accuracy --prompt-version v2_zh_balanced --run 1 --model Qwen/Qwen3-8B
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from prompt_loader import DEFAULT_PROMPT_ID, list_prompt_ids
+from susmessagebot.prompt_loader import DEFAULT_PROMPT_ID, list_prompt_ids
 
 GOLD: list[tuple[str, str, str]] = [
     # ---- BAN: ads / promo / selling (50) ----
@@ -157,9 +157,10 @@ _N_SAFE = sum(1 for _, y, _ in GOLD if y == "SAFE")
 assert _N_BAN == _N_SAFE, (_N_BAN, _N_SAFE)
 assert len(GOLD) == _N_BAN + _N_SAFE
 
-RESULTS_ROOT = Path("eval_results")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULTS_ROOT = PROJECT_ROOT / "eval_results"
 RESULTS_DIR = RESULTS_ROOT  # set in main()
-RESULTS_PATH = Path("eval_results.jsonl")  # set in main()
+RESULTS_PATH = PROJECT_ROOT / "eval_results.jsonl"  # set in main()
 
 
 def run_dir(prompt_id: str, run: int) -> Path:
@@ -200,7 +201,7 @@ def append_result(row: dict) -> None:
 
 
 def classify_with_retry(text: str, retries: int = 5) -> str:
-    from moderator import classify_message
+    from susmessagebot.moderator import classify_message
 
     delay = 5
     for attempt in range(retries):
@@ -343,7 +344,7 @@ def rebuild_index_md() -> None:
         s = json.loads(summary_path.read_text(encoding="utf-8"))
         prompt_id = s.get("prompt_version") or summary_path.parts[-3].removeprefix("prompt_")
         run = s.get("run") or int(summary_path.parts[-2].removeprefix("run"))
-        rel = summary_path.parent.as_posix()
+        rel = summary_path.parent.relative_to(PROJECT_ROOT).as_posix()
         entries.append((prompt_id, run, s, rel))
 
     for prompt_id, run, s, rel in sorted(
@@ -358,8 +359,8 @@ def rebuild_index_md() -> None:
         "",
         "## 提示词文件",
         "",
-        "- `prompts/v1_en_aggressive.md` — 英文偏严（v1 bakeoff）",
-        "- `prompts/v2_zh_balanced.md` — 中文平衡，默认 SAFE，降误杀（当前默认）",
+        "- `susmessagebot/prompts/v1_en_aggressive.md` — 英文偏严（v1 bakeoff）",
+        "- `susmessagebot/prompts/v2_zh_balanced.md` — 中文平衡，默认 SAFE，降误杀（当前默认）",
         "",
         "## 探测备注",
         "",
@@ -384,7 +385,7 @@ def main() -> None:
         "--prompt-version",
         type=str,
         default=DEFAULT_PROMPT_ID,
-        help=f"Prompt id under prompts/ (available: {', '.join(list_prompt_ids())})",
+        help=f"Prompt id under susmessagebot/prompts/ (available: {', '.join(list_prompt_ids())})",
     )
     parser.add_argument(
         "--run",
@@ -397,8 +398,7 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    import config
-    import moderator
+    from susmessagebot import config, moderator
 
     prompt_id = args.prompt_version
     if prompt_id not in list_prompt_ids():

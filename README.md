@@ -14,15 +14,24 @@ Singaporeans lost a record S$1.1 billion to scams in 2024 and S$913.1 million in
 
 ![Architecture Diagram](assets/architecture.png)
 
+## Project Structure
+
+```text
+susmessagebot/  Runtime package, prompts, and seed examples
+scripts/        Evaluation and bakeoff tools
+tests/          Regression tests
+.github/        CI/CD workflows and GitHub templates
+```
+
 # Technical Implementation:
 
-1. `bot_discord.py` scans incoming Discord messages and image attachments.
-2. Incoming text is sent to `moderator.py`, where it is first converted into an embedding (defined in `vector_store.py`).
+1. `susmessagebot/bot.py` scans incoming Discord messages and image attachments.
+2. Incoming text is sent to `susmessagebot/moderator.py`, where it is first converted into an embedding (defined in `susmessagebot/vector_store.py`).
 3. Input text embedding is then compared with current existing labelled examples to retrieve most similar examples. (Retrieval-Augmented Generation)
 4. Examples and system prompt are in tandem fed to SiliconFlow (`Qwen/Qwen3.5-4B`), which will return a singular classification: `BAN` or `SAFE`.
 5. The bot acts on the classification — deleting the message and banning the user if `BAN`, doing nothing if `SAFE`.
 6. On every ban, admins are notified with two buttons: **✅ Correct Ban** or **❌ Wrong Ban**.
-7. Admin feedback is used to update ChromaDB in real time and sync `seeds.py` to the GitHub repository via the GitHub API — keeping the repository as the source of truth for all labelled examples. (Human-in-the-Loop)
+7. Admin feedback is used to update ChromaDB in real time and sync `susmessagebot/seeds.py` to the GitHub repository via the GitHub API — keeping the repository as the source of truth for all labelled examples. (Human-in-the-Loop)
 8. Every classification, ban, and false positive is tracked as a Prometheus metric, scraped by Grafana Alloy, and visualized in a live Grafana Cloud dashboard.
 9. Admins (or users pending admin approval) can report missed scams — adding them to ChromaDB, syncing to GitHub, and tracking as false negatives in the monitoring dashboard.
 10. Group and member counts are tracked automatically — every new group/server the bot is added to is recorded, with member counts updated daily.
@@ -42,8 +51,8 @@ Singaporeans lost a record S$1.1 billion to scams in 2024 and S$913.1 million in
 
 Every time the bot removes suspicious content, admins receive two review buttons by DM:
 
-- **✅ Correct Ban** — confirms the ban and adds the message as a `BAN` example to ChromaDB and `seeds.py`
-- **❌ Wrong Ban** — marks it as a false positive, unbans the user, and adds the message as a `SAFE` example to ChromaDB and `seeds.py`
+- **✅ Correct Ban** — confirms the ban and adds the message as a `BAN` example to ChromaDB and `susmessagebot/seeds.py`
+- **❌ Wrong Ban** — marks it as a false positive, unbans the user, and adds the message as a `SAFE` example to ChromaDB and `susmessagebot/seeds.py`
 
 This means the bot gets smarter over time with every admin correction, without any manual retraining.
 
@@ -92,7 +101,7 @@ I seek your kind understanding for any teething issues.
 - Add the following to your `.env` file:
   - `SILICONFLOW_API_KEY` — obtain from [cloud.siliconflow.cn](https://cloud.siliconflow.cn)
   - `SILICONFLOW_MODEL` — optional, defaults to `Qwen/Qwen2.5-7B-Instruct`
-  - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python bot_discord.py`
+  - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python -m susmessagebot.bot`
   - `GITHUB_TOKEN` — GitHub Personal Access Token with `Contents: Read and Write` permission
   - `GITHUB_REPO` — your forked repository (e.g. `yourusername/susmessagebot`)
   - `GITHUB_BRANCH` — branch to sync examples to (e.g. `groq-approach`)
@@ -170,7 +179,7 @@ docker compose up -d
 python -m venv venv && source venv/bin/activate
 pip install -r requirements-vps.txt
 cp .env.example .env   # fill tokens
-python bot_discord.py
+python -m susmessagebot.bot
 ```
 
 Health: `http://127.0.0.1:8001/health` (200 only after Discord gateway ready)  

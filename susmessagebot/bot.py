@@ -1,24 +1,24 @@
 import discord
 from discord import app_commands
-from moderator import classify_message
-from image_moderator import classify_image
-from url_moderator import analyze_urls, load_blocklist
-from config import (
+from .moderator import classify_message
+from .image_moderator import classify_image
+from .url_moderator import analyze_urls, load_blocklist
+from .config import (
     DISCORD_BOT_TOKEN,
     APPEAL_DISCORD_USER_ID,
     HEALTH_PORT,
     METRICS_PORT,
 )
-from github_sync import sync_example_to_github
-from vector_store import add_example
-from strike_tracker import strikes, remove_notice_text, ban_notice_text
+from .github_sync import sync_example_to_github
+from .vector_store import add_example
+from .strike_tracker import strikes, remove_notice_text, ban_notice_text
 import logging
 import asyncio
 import io
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from prometheus_client import Gauge, start_http_server
-from stats import init_db, get_stat, increment_stat, add_group, get_groups_count, get_total_members
+from .stats import init_db, get_stat, increment_stat, add_group, get_groups_count, get_total_members
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 

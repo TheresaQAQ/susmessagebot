@@ -1,4 +1,4 @@
-from vector_store import add_example
+from .vector_store import add_example
 
 examples = [
     ("🇺🇸 +1888 • 🇦🇺 +61 #WTS DID & SIP Trunk — Ready Now @Activepaidviop", "BAN"),

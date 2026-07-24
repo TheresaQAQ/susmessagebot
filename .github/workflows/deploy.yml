@@ -6,17 +6,19 @@ on:
       - groq-approach
     paths-ignore:
       # HITL sync commits seeds via GitHub API; skip rebuild loops.
-      - "seeds.py"
+      - "susmessagebot/seeds.py"
       - "assets/**"
-      - "**.md"
+      - "README.md"
+      - "CONTRIBUTING.md"
       - "eval_results/**"
   pull_request:
     branches:
       - groq-approach
     paths-ignore:
-      - "seeds.py"
+      - "susmessagebot/seeds.py"
       - "assets/**"
-      - "**.md"
+      - "README.md"
+      - "CONTRIBUTING.md"
       - "eval_results/**"
 
 concurrency:
@@ -56,12 +58,7 @@ jobs:
         run: pip install -r requirements-vps.txt
 
       - name: Syntax check
-        run: |
-          python -m compileall -q \
-            bot_discord.py config.py moderator.py vector_store.py \
-            url_moderator.py image_moderator.py strike_tracker.py stats.py \
-            github_sync.py prompt_loader.py seeds.py eval_accuracy.py \
-            summarize_runs.py test_regressions.py
+        run: python -m compileall -q susmessagebot scripts tests
 
       - name: Unit tests
         env:
@@ -69,7 +66,7 @@ jobs:
           DISCORD_BOT_TOKEN: ci-dummy
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
           TOKENIZERS_PARALLELISM: "false"
-        run: python -m unittest test_regressions.py -v
+        run: python -m unittest discover -s tests -p "test_*.py" -v
 
   build:
     needs: test

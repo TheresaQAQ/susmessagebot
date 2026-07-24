@@ -1,7 +1,7 @@
 import sqlite3
 import os
 
-from config import STATS_DB_PATH
+from .config import STATS_DB_PATH
 
 DB_PATH = STATS_DB_PATH
 

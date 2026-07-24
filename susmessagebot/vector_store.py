@@ -7,7 +7,7 @@ except ImportError:
 
 import chromadb
 from sentence_transformers import SentenceTransformer
-from config import EMBEDDING_MODEL, SIMILARITY_THRESHOLD, MAX_EXAMPLES, CHROMA_DB_PATH
+from .config import EMBEDDING_MODEL, SIMILARITY_THRESHOLD, MAX_EXAMPLES, CHROMA_DB_PATH
 
 import os
 import warnings

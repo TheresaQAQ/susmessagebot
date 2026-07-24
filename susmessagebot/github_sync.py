@@ -1,8 +1,8 @@
 import base64
 import requests
-from config import GITHUB_TOKEN, GITHUB_REPO, GITHUB_BRANCH
+from .config import GITHUB_TOKEN, GITHUB_REPO, GITHUB_BRANCH
 
-SEEDS_PATH = "seeds.py"
+SEEDS_PATH = "susmessagebot/seeds.py"
 API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{SEEDS_PATH}"
 
 HEADERS = {

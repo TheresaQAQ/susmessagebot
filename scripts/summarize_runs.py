@@ -7,7 +7,8 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-RESULTS_ROOT = Path("eval_results")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULTS_ROOT = PROJECT_ROOT / "eval_results"
 METRICS = [
     "accuracy",
     "ban_precision",
@@ -101,7 +102,7 @@ def main() -> None:
         )
     lines += [
         "",
-        f"明细 JSON：`{out_dir.as_posix()}/`",
+        f"明细 JSON：`{out_dir.relative_to(PROJECT_ROOT).as_posix()}/`",
         "",
     ]
     md_path = out_dir / "comparison.md"

@@ -6,7 +6,7 @@ Thank you for your interest in contributing! Here's how you can help:
 
 The most impactful contribution is adding real-world scam/spam examples to improve the bot's accuracy.
 
-1. Add your examples to `seeds.py` in the following format:
+1. Add your examples to `susmessagebot/seeds.py` in the following format:
 
 ```python
 ("your example message here", "BAN"),  # or "SAFE"

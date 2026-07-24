@@ -3,7 +3,7 @@ import logging
 import requests
 from urllib.parse import urlparse
 from openai import OpenAI
-from config import (
+from .config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
     SILICONFLOW_MODEL,

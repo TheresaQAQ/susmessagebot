@@ -2,15 +2,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import bot_discord
-import moderator
-import seeds
-import url_moderator
-from strike_tracker import StrikeTracker
+from susmessagebot import bot as bot_discord
+from susmessagebot import moderator, seeds, url_moderator
+from susmessagebot.strike_tracker import StrikeTracker
 
 
 class UrlModeratorRegressionTests(unittest.TestCase):
-    @patch("url_moderator._classify_url_with_llm", return_value="BAN")
+    @patch("susmessagebot.url_moderator._classify_url_with_llm", return_value="BAN")
     def test_invite_domains_are_reviewed(self, classify_url):
         result = url_moderator.analyze_urls(
             "Join this promotional server: https://discord.gg/scam"
@@ -19,8 +17,8 @@ class UrlModeratorRegressionTests(unittest.TestCase):
         self.assertEqual(result, "BAN")
         classify_url.assert_called_once_with("https://discord.gg/scam")
 
-    @patch("url_moderator._classify_url_with_llm", return_value="SAFE")
-    @patch("url_moderator.requests.head")
+    @patch("susmessagebot.url_moderator._classify_url_with_llm", return_value="SAFE")
+    @patch("susmessagebot.url_moderator.requests.head")
     def test_user_urls_are_not_fetched_from_bot_host(self, head, classify_url):
         result = url_moderator.analyze_urls("See http://127.0.0.1:8001/health")
 

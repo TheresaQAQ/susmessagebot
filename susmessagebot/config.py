@@ -26,8 +26,9 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 SIMILARITY_THRESHOLD = 1.0
 MAX_EXAMPLES = 5
 
-# Runtime data directory. Local default is the project root; containers use /app/data.
-DATA_DIR = os.path.abspath(os.getenv("DATA_DIR", os.path.dirname(__file__)))
+# Runtime data directory. Local default stays at the project root for compatibility.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.abspath(os.getenv("DATA_DIR", PROJECT_ROOT))
 os.makedirs(DATA_DIR, exist_ok=True)
 STATS_DB_PATH = os.path.join(DATA_DIR, "stats.db")
 CHROMA_DB_PATH = os.path.join(DATA_DIR, "chroma_db")

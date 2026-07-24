@@ -7,7 +7,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/app/.cache/huggingface \
     TRANSFORMERS_CACHE=/app/.cache/huggingface \
     TOKENIZERS_PARALLELISM=false \
-    HF_HUB_DISABLE_IMPLICIT_TOKEN=1 \
     HEALTH_PORT=8001 \
     METRICS_PORT=8000
 
@@ -38,4 +37,4 @@ EXPOSE 8000 8001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8001/health || exit 1
 
-CMD ["python", "bot_discord.py"]
+CMD ["python", "-m", "susmessagebot.bot"]

@@ -38,7 +38,7 @@ bakeoff.log
 # Docs / assets not needed at runtime
 assets/
 *.md
-!prompts/**/*.md
+!susmessagebot/prompts/**/*.md
 
 # Editor / OS
 .DS_Store

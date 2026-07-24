@@ -7,13 +7,13 @@ import re
 from openai import OpenAI
 from PIL import Image
 
-from config import (
+from .config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
     SILICONFLOW_MODEL,
 )
-from prompt_loader import DEFAULT_PROMPT_ID, render_prompt
-from vector_store import get_similar_examples
+from .prompt_loader import DEFAULT_PROMPT_ID, render_prompt
+from .vector_store import get_similar_examples
 
 client = OpenAI(
     api_key=SILICONFLOW_API_KEY,

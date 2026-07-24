@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Run 100-sample eval across candidate free SiliconFlow models.
 # Usage:
-#   ./run_model_bakeoff.sh
-#   ./run_model_bakeoff.sh v2_zh_balanced 1
-#   PROMPT_VERSION=v2_zh_balanced RUN=1 ./run_model_bakeoff.sh
+#   ./scripts/run_model_bakeoff.sh
+#   ./scripts/run_model_bakeoff.sh v2_zh_balanced 1
+#   PROMPT_VERSION=v2_zh_balanced RUN=1 ./scripts/run_model_bakeoff.sh
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 PROMPT_VERSION="${1:-${PROMPT_VERSION:-v2_zh_balanced}}"
 RUN="${2:-${RUN:-1}}"
@@ -25,7 +25,7 @@ echo "Prompt=$PROMPT_VERSION Run=$RUN Out=$OUT_DIR" | tee "$LOG"
 
 for model in "${MODELS[@]}"; do
   echo "======== START $model ========" | tee -a "$LOG"
-  python eval_accuracy.py \
+  python -m scripts.eval_accuracy \
     --prompt-version "$PROMPT_VERSION" \
     --run "$RUN" \
     --model "$model" \
