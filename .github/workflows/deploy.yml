@@ -125,29 +125,42 @@ jobs:
       group: production-deploy
       cancel-in-progress: false
     steps:
+      - name: Checkout deployment config
+        uses: actions/checkout@v4
+
+      - name: Encode runtime Compose
+        id: compose
+        run: echo "content=$(base64 -w0 compose.yaml)" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to VPS over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: IMAGE,GHCR_USERNAME,GHCR_READ_TOKEN
+          envs: IMAGE,GHCR_USERNAME,GHCR_READ_TOKEN,COMPOSE_B64
           script: |
             set -euo pipefail
 
             APP_DIR="${HOME}/susmessagebot"
+            mkdir -p "$APP_DIR"
             cd "$APP_DIR"
+
+            # Install runtime configuration sent by Actions. The VPS never
+            # clones or pulls the source repository.
+            printf '%s' "${COMPOSE_B64}" | base64 --decode > compose.yaml.tmp
+            mv compose.yaml.tmp compose.yaml
+
+            if [ ! -f .env ]; then
+              echo "Missing ${APP_DIR}/.env; create it on the VPS before deploying"
+              exit 1
+            fi
 
             # Stop legacy non-container process if still enabled.
             if systemctl is-active --quiet susmessagebot 2>/dev/null; then
               sudo systemctl stop susmessagebot || true
               sudo systemctl disable susmessagebot || true
             fi
-
-            # Fast-forward compose/config from the deploy branch.
-            git fetch origin groq-approach
-            git checkout groq-approach
-            git pull --ff-only origin groq-approach
 
             mkdir -p data
             if [ -f stats.db ] && [ ! -f data/stats.db ]; then
@@ -197,3 +210,4 @@ jobs:
           IMAGE: ${{ needs.build.outputs.image }}
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          COMPOSE_B64: ${{ steps.compose.outputs.content }}

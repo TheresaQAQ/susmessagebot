@@ -116,8 +116,9 @@ Production path for `groq-approach`:
 
 1. GitHub Actions runs unit tests on every PR / push.
 2. On push, Actions builds `ghcr.io/<owner>/susmessagebot:<git-sha>` (CPU PyTorch wheel; no CUDA) and pushes to GHCR.
-3. Actions SSHs into the VPS, pulls that exact image, and restarts Docker Compose.
-4. Deploy waits until `http://127.0.0.1:8001/health` reports Discord readiness; on failure it rolls back to the previous image.
+3. Actions sends the runtime `compose.yaml` over SSH; the VPS does not clone the source repository.
+4. The VPS pulls that exact image and restarts Docker Compose.
+5. Deploy waits until `http://127.0.0.1:8001/health` reports Discord readiness; on failure it rolls back to the previous image.
 
 Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`, …) stay on the VPS in `.env` and are **not** stored as GitHub Actions secrets.
 
@@ -135,14 +136,16 @@ Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`,
 
 ```bash
 # Install Docker Engine + Compose plugin, then:
-git clone git@github.com:<you>/susmessagebot.git ~/susmessagebot
+mkdir -p ~/susmessagebot/data
 cd ~/susmessagebot
-git checkout groq-approach
 
-cp .env.example .env
-# edit .env — set DISCORD_BOT_TOKEN, SILICONFLOW_*, GITHUB_*
+# Create .env directly on the VPS. At minimum, set:
+# DISCORD_BOT_TOKEN, SILICONFLOW_API_KEY, SILICONFLOW_MODEL,
+# GITHUB_TOKEN, GITHUB_REPO, and GITHUB_BRANCH.
+touch .env
+chmod 600 .env
+# edit .env
 
-mkdir -p data
 # Migrate legacy host paths if you previously ran outside Docker:
 #   [ -f stats.db ] && mv stats.db data/stats.db
 #   [ -d chroma_db ] && mv chroma_db data/chroma_db
@@ -151,11 +154,8 @@ mkdir -p data
 #   sudo systemctl stop susmessagebot
 #   sudo systemctl disable susmessagebot
 
-echo "$GHCR_READ_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
-export IMAGE=ghcr.io/<owner>/susmessagebot:latest
-docker compose pull
-docker compose up -d
-curl -fsS http://127.0.0.1:8001/health
+# Push to groq-approach (or manually run the workflow). Actions uploads
+# compose.yaml, pulls the image, and starts the service.
 ```
 
 Persistent runtime data lives in `~/susmessagebot/data/` (`stats.db`, `chroma_db/`). Back it up before risky changes:
