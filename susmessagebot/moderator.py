@@ -14,6 +14,7 @@ from .config import (
 )
 from .llm_utils import should_disable_thinking
 from .prompt_loader import DEFAULT_PROMPT_ID, render_prompt
+from .utils import normalize_text
 from .vector_store import get_similar_examples
 
 client = OpenAI(
@@ -91,8 +92,12 @@ def classify_message(message: str) -> str:
 
     REVIEW means classification failed and the message requires manual review.
     """
+    normalized = normalize_text(message)
+    if not normalized:
+        return "SAFE"
+
     try:
-        examples = get_similar_examples(message)
+        examples = get_similar_examples(normalized)
         system_prompt = render_prompt(PROMPT_ID, examples)
 
         model = config.SILICONFLOW_MODEL
@@ -100,7 +105,7 @@ def classify_message(message: str) -> str:
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"<message>{message}</message>"},
+                {"role": "user", "content": f"<message>{normalized}</message>"},
             ],
             "max_tokens": 64,
             "temperature": 0,

@@ -7,9 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from susmessagebot import bot as bot_discord
-from susmessagebot import moderator, seeds, stats, url_moderator
+from susmessagebot import github_sync, moderator, seeds, stats, url_moderator, utils
 from susmessagebot.llm_utils import should_disable_thinking
 from susmessagebot.strike_tracker import StrikeTracker, ban_notice_text
+from susmessagebot import vector_store
 from susmessagebot.vector_store import _example_id
 
 
@@ -94,6 +95,121 @@ class UrlModeratorRegressionTests(unittest.TestCase):
         self.assertEqual(result, "SAFE")
         head.assert_not_called()
         classify_url.assert_called_once_with("http://127.0.0.1:8001/health")
+
+
+class TextNormalizationTests(unittest.TestCase):
+    def test_normalize_folds_fullwidth_and_keeps_cjk(self):
+        self.assertEqual(utils.normalize_text("ＳＩＰ　Ｔｒｕｎｋ"), "SIP Trunk")
+        self.assertIn("免费代充", utils.normalize_text("免费代充活动"))
+
+    def test_normalize_folds_mathematical_alnum_and_zero_width(self):
+        fancy = "𝗦𝗜𝗣 𝗧𝗿𝘂𝗻𝗸𝘀"
+        self.assertIn("SIP", utils.normalize_text(fancy))
+        self.assertEqual(utils.normalize_text("a\u200bb"), "ab")
+
+    @patch.object(
+        moderator.client.chat.completions,
+        "create",
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        ),
+    )
+    @patch.object(moderator, "render_prompt", return_value="rules")
+    @patch.object(moderator, "get_similar_examples", return_value="")
+    def test_classify_message_uses_normalized_text(
+        self,
+        get_examples,
+        render_prompt,
+        create,
+    ):
+        self.assertEqual(
+            moderator.classify_message("Please do not buy SIP trunks here; it is spam"),
+            "SAFE",
+        )
+        create.assert_called_once()
+        get_examples.assert_called_once()
+        user_content = create.call_args.kwargs["messages"][1]["content"]
+        self.assertIn("SIP trunks", user_content)
+
+
+class GithubSyncDedupTests(unittest.TestCase):
+    @patch.object(github_sync, "GITHUB_TOKEN", "token")
+    @patch.object(github_sync, "GITHUB_REPO", "TheresaQAQ/susmessagebot")
+    @patch("susmessagebot.github_sync.requests.put")
+    @patch("susmessagebot.github_sync.requests.get")
+    def test_duplicate_example_is_not_rewritten(self, get, put):
+        existing = 'SEED_EXAMPLES = [\n    ("hello", "BAN"),\n]\n'
+        get.return_value = SimpleNamespace(
+            status_code=200,
+            text="ok",
+            json=lambda: {
+                "sha": "abc",
+                "content": __import__("base64").b64encode(existing.encode()).decode(),
+            },
+        )
+
+        self.assertTrue(github_sync.sync_example_to_github("hello", "BAN"))
+        put.assert_not_called()
+
+    @patch.object(github_sync, "GITHUB_TOKEN", "token")
+    @patch.object(github_sync, "GITHUB_REPO", "TheresaQAQ/susmessagebot")
+    @patch("susmessagebot.github_sync.requests.put")
+    @patch("susmessagebot.github_sync.requests.get")
+    def test_label_correction_rewrites_existing_seed(self, get, put):
+        existing = 'SEED_EXAMPLES = [\n    ("hello", "BAN"),\n]\n'
+        get.return_value = SimpleNamespace(
+            status_code=200,
+            text="ok",
+            json=lambda: {
+                "sha": "abc",
+                "content": __import__("base64").b64encode(existing.encode()).decode(),
+            },
+        )
+        put.return_value = SimpleNamespace(status_code=200, text="ok")
+
+        self.assertTrue(github_sync.sync_example_to_github("hello", "SAFE"))
+        put.assert_called_once()
+        payload = put.call_args.kwargs["json"]
+        decoded = __import__("base64").b64decode(payload["content"]).decode()
+        self.assertIn('("hello", "SAFE")', decoded)
+        self.assertNotIn('("hello", "BAN")', decoded)
+        self.assertIn("Update example to SAFE", payload["message"])
+
+    @patch.object(github_sync, "GITHUB_TOKEN", "token")
+    @patch.object(github_sync, "GITHUB_REPO", "TheresaQAQ/susmessagebot")
+    @patch("susmessagebot.github_sync.requests.put")
+    @patch("susmessagebot.github_sync.requests.get")
+    def test_legacy_conflicting_duplicates_are_consolidated(self, get, put):
+        # First occurrence matches the new HITL label, but a later stale dupe
+        # would otherwise win when seeds.py is applied in order.
+        existing = (
+            'examples = [\n'
+            '    ("hello", "BAN"),\n'
+            '    ("other", "SAFE"),\n'
+            '    ("hello", "SAFE"),\n'
+            ']\n'
+        )
+        get.return_value = SimpleNamespace(
+            status_code=200,
+            text="ok",
+            json=lambda: {
+                "sha": "abc",
+                "content": __import__("base64").b64encode(existing.encode()).decode(),
+            },
+        )
+        put.return_value = SimpleNamespace(status_code=200, text="ok")
+
+        self.assertTrue(github_sync.sync_example_to_github("hello", "BAN"))
+        put.assert_called_once()
+        payload = put.call_args.kwargs["json"]
+        decoded = __import__("base64").b64decode(payload["content"]).decode()
+        self.assertEqual(decoded.count('("hello", "BAN")'), 1)
+        self.assertNotIn('("hello", "SAFE")', decoded)
+        self.assertIn('("other", "SAFE")', decoded)
 
 
 class ClassifierFailureRegressionTests(unittest.TestCase):
@@ -659,6 +775,7 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.object(bot_discord, "strikes", tracker),
                 patch.object(bot_discord, "increment_stat"),
+                patch.object(bot_discord, "get_stat", return_value=0),
                 patch.object(bot_discord, "_dm_user", AsyncMock()),
                 patch.object(
                     bot_discord,
@@ -1117,8 +1234,199 @@ class ExampleIdTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotEqual(first, other)
         self.assertEqual(len(first), 64)
-        self.assertEqual(first, __import__("hashlib").sha256(b"cheap accounts").hexdigest())
+        self.assertEqual(
+            first,
+            __import__("hashlib").sha256(b"cheap accounts").hexdigest(),
+        )
         self.assertNotEqual(first, str(hash("cheap accounts")))
+
+    @patch.object(vector_store, "ensure_normalized_index")
+    @patch.object(vector_store, "embedding_model")
+    @patch.object(vector_store, "collection")
+    def test_add_example_keeps_raw_text_id_after_normalization(
+        self,
+        collection,
+        embedding_model,
+        ensure_index,
+    ):
+        raw = "a\u200bb"
+        normalized = utils.normalize_text(raw)
+        self.assertEqual(normalized, "ab")
+        self.assertNotEqual(_example_id(raw), _example_id(normalized))
+        encoded = MagicMock()
+        encoded.tolist.return_value = [0.1, 0.2, 0.3]
+        embedding_model.encode.return_value = encoded
+        # No siblings share this normalized form yet.
+        collection.get.side_effect = [
+            {"ids": []},  # where norm_key=
+            {"ids": [], "documents": [], "metadatas": []},  # fallback scan
+        ]
+
+        vector_store.add_example(raw, "SAFE")
+
+        ensure_index.assert_called_once()
+        collection.delete.assert_not_called()
+        collection.upsert.assert_called_once()
+        kwargs = collection.upsert.call_args.kwargs
+        self.assertEqual(kwargs["ids"], [_example_id(raw)])
+        self.assertEqual(kwargs["documents"], [normalized])
+        self.assertEqual(
+            kwargs["metadatas"],
+            [{"label": "SAFE", "norm_key": normalized}],
+        )
+        embedding_model.encode.assert_called_once_with(normalized)
+
+    @patch.object(vector_store, "ensure_normalized_index")
+    @patch.object(vector_store, "embedding_model")
+    @patch.object(vector_store, "collection")
+    def test_add_example_reconciles_all_normalized_variants(
+        self,
+        collection,
+        embedding_model,
+        ensure_index,
+    ):
+        first = "ＳＩＰ"
+        second = "𝕊𝕀ℙ"
+        normalized = utils.normalize_text(first)
+        self.assertEqual(normalized, utils.normalize_text(second))
+        self.assertEqual(normalized, "SIP")
+        first_id = _example_id(first)
+        second_id = _example_id(second)
+        plain_id = _example_id(normalized)
+        self.assertNotEqual(first_id, second_id)
+        self.assertNotEqual(first_id, plain_id)
+
+        encoded = MagicMock()
+        encoded.tolist.return_value = [0.1, 0.2, 0.3]
+        embedding_model.encode.return_value = encoded
+        # Existing non-plain variants share the normalized document; neither
+        # is stored under the plain SIP id.
+        collection.get.side_effect = [
+            {"ids": []},  # where norm_key= (pre-metadata)
+            {
+                "ids": [first_id, second_id],
+                "documents": [normalized, normalized],
+                "metadatas": [
+                    {"label": "BAN"},
+                    {"label": "SAFE"},
+                ],
+            },
+        ]
+
+        vector_store.add_example(second, "SAFE")
+
+        ensure_index.assert_called_once()
+        collection.delete.assert_not_called()
+        collection.upsert.assert_called_once()
+        kwargs = collection.upsert.call_args.kwargs
+        self.assertEqual(set(kwargs["ids"]), {second_id, first_id})
+        self.assertEqual(kwargs["documents"], [normalized, normalized])
+        self.assertEqual(
+            kwargs["metadatas"],
+            [
+                {"label": "SAFE", "norm_key": normalized},
+                {"label": "SAFE", "norm_key": normalized},
+            ],
+        )
+
+    @patch.object(vector_store, "ensure_normalized_index")
+    @patch.object(vector_store, "embedding_model")
+    @patch.object(vector_store, "collection")
+    def test_get_similar_examples_omits_conflicting_duplicate_docs(
+        self,
+        collection,
+        embedding_model,
+        ensure_index,
+    ):
+        encoded = MagicMock()
+        encoded.tolist.return_value = [0.1, 0.2, 0.3]
+        embedding_model.encode.return_value = encoded
+        collection.count.return_value = 2
+        collection.query.return_value = {
+            "documents": [["SIP", "SIP"]],
+            "metadatas": [[{"label": "BAN"}, {"label": "SAFE"}]],
+            "distances": [[0.1, 0.2]],
+        }
+
+        self.assertEqual(vector_store.get_similar_examples("SIP"), "")
+        ensure_index.assert_called_once()
+
+    @patch.object(vector_store, "embedding_model")
+    @patch.object(vector_store, "collection")
+    def test_ensure_normalized_index_reembeds_persisted_rows(
+        self,
+        collection,
+        embedding_model,
+    ):
+        encoded = MagicMock()
+        encoded.tolist.return_value = [0.4, 0.5, 0.6]
+        embedding_model.encode.return_value = encoded
+        collection.get.return_value = {
+            "ids": ["row1"],
+            "documents": ["ＳＩＰ"],
+            "metadatas": [{"label": "BAN"}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / ".schema_normalized-v1"
+            with (
+                patch.object(vector_store, "_SCHEMA_MARKER", str(marker)),
+                patch.object(vector_store, "_index_ready", False),
+            ):
+                vector_store.ensure_normalized_index()
+                vector_store.ensure_normalized_index()  # second call is no-op
+
+            self.assertTrue(marker.is_file())
+
+        embedding_model.encode.assert_called_once_with("SIP")
+        collection.upsert.assert_called_once()
+        kwargs = collection.upsert.call_args.kwargs
+        self.assertEqual(kwargs["ids"], ["row1"])
+        self.assertEqual(kwargs["documents"], ["SIP"])
+        self.assertEqual(
+            kwargs["metadatas"],
+            [{"label": "BAN", "norm_key": "SIP"}],
+        )
+
+    @patch.object(vector_store, "collection")
+    def test_ensure_normalized_index_does_not_mark_failed_reindex(self, collection):
+        collection.get.side_effect = RuntimeError("chroma unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / ".schema_normalized-v1"
+            with (
+                patch.object(vector_store, "_SCHEMA_MARKER", str(marker)),
+                patch.object(vector_store, "_index_ready", False),
+            ):
+                vector_store.ensure_normalized_index()
+                self.assertFalse(marker.exists())
+                self.assertFalse(vector_store._index_ready)
+
+    @patch.object(vector_store, "ensure_normalized_index")
+    @patch.object(vector_store, "embedding_model")
+    @patch.object(vector_store, "collection")
+    def test_sibling_lookup_skips_full_scan_after_metadata_hit(
+        self,
+        collection,
+        embedding_model,
+        ensure_index,
+    ):
+        raw = "ＳＩＰ"
+        normalized = "SIP"
+        variant_id = _example_id(raw)
+        encoded = MagicMock()
+        encoded.tolist.return_value = [0.1, 0.2, 0.3]
+        embedding_model.encode.return_value = encoded
+        collection.get.return_value = {"ids": [variant_id]}
+
+        vector_store.add_example(raw, "BAN")
+
+        collection.get.assert_called_once_with(
+            where={"norm_key": normalized},
+            include=[],
+        )
+        kwargs = collection.upsert.call_args.kwargs
+        self.assertEqual(kwargs["ids"], [variant_id])
 
 
 class StrikePersistenceTests(unittest.TestCase):

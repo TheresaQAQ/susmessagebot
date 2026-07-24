@@ -10,7 +10,7 @@ from .config import (
     METRICS_PORT,
 )
 from .github_sync import sync_example_to_github
-from .vector_store import add_example
+from .vector_store import add_example, ensure_normalized_index
 from .strike_tracker import strikes, remove_notice_text, ban_notice_text
 import logging
 import asyncio
@@ -1300,6 +1300,7 @@ def main():
         print("DISCORD_BOT_TOKEN is not set. Exiting.")
         return
     init_db()
+    ensure_normalized_index()
     init_metrics()
     start_health_server()
     start_http_server(METRICS_PORT)
