@@ -223,9 +223,12 @@ async def on_message(message: discord.Message):
 
         if is_admin:
             text = _message_text(reported_msg)
-            _record_training_example(text, "BAN")
-            increment_stat('false_negatives')
-            FALSE_NEGATIVES.set(get_stat('false_negatives'))
+            try:
+                _record_training_example(text, "BAN")
+                increment_stat('false_negatives')
+                FALSE_NEGATIVES.set(get_stat('false_negatives'))
+            except Exception as e:
+                logging.error(f"Training persistence failed for admin report: {e}")
             try:
                 await reported_msg.delete()
                 await _execute_ban(
@@ -237,7 +240,7 @@ async def on_message(message: discord.Message):
             except Exception as e:
                 logging.error(f"Error banning reported user: {e}")
                 await message.channel.send(
-                    "✅ Added to training. Could not ban user."
+                    "⚠️ Could not ban user. Please retry or ban manually."
                 )
         else:
             text = _message_text(reported_msg)
@@ -390,9 +393,13 @@ async def _execute_ban(
     user: discord.abc.User,
     reason: str,
     preserve_auto_ban_record: bool = False,
+    automatic: bool = False,
 ) -> None:
     """DM ban notice first (ban removes mutual servers), then ban and clear strikes."""
-    await _dm_user(user, ban_notice_text(APPEAL_DISCORD_USER_ID))
+    await _dm_user(
+        user,
+        ban_notice_text(APPEAL_DISCORD_USER_ID, automatic=automatic),
+    )
     await guild.ban(discord.Object(id=user.id), reason=reason)
     strikes.clear(guild.id, user.id)
     if not preserve_auto_ban_record:
@@ -612,9 +619,8 @@ async def _ban_user(
             threshold = strikes.threshold
             window_min = strikes.window_seconds // 60
             logging.info(f"Auto-ban after {threshold} reviewed triggers: user {author.id}")
-            _record_training_example(content, "BAN")
-            increment_stat('bans_confirmed')
-            BANS_CONFIRMED.set(get_stat('bans_confirmed'))
+            # Do not treat machine auto-bans as admin-confirmed training/metrics.
+            # Admins can still confirm/false-alarm via the review DM.
             record_auto_ban(guild.id, author.id, message_id)
             try:
                 await _execute_ban(
@@ -622,6 +628,7 @@ async def _ban_user(
                     user=author,
                     reason=f"Auto-ban: {reason}",
                     preserve_auto_ban_record=True,
+                    automatic=True,
                 )
             except Exception as e:
                 logging.error(f"Error auto-banning user: {e}")
@@ -815,19 +822,7 @@ class HITLBanButton(
             increment_stat('bans_confirmed')
             BANS_CONFIRMED.set(get_stat('bans_confirmed'))
         except Exception as e:
-            logging.error(f"Error recording ban decision: {e}")
-            _release_review_claim(
-                guild_id=self.guild_id,
-                message_id=self.message_id,
-                user_id=self.user_id,
-                decision="ban",
-                decided_by=interaction.user.id,
-            )
-            await _edit_review_message(
-                interaction,
-                "⚠️ Failed to record decision. Please try again.",
-            )
-            return
+            logging.error(f"Error recording ban training example: {e}")
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
@@ -845,9 +840,16 @@ class HITLBanButton(
             await _edit_review_message(interaction, "🚫 User banned.")
         except Exception as e:
             logging.error(f"Error banning user: {e}")
+            _release_review_claim(
+                guild_id=self.guild_id,
+                message_id=self.message_id,
+                user_id=self.user_id,
+                decision="ban",
+                decided_by=interaction.user.id,
+            )
             await _edit_review_message(
                 interaction,
-                "✅ Added to training. Could not ban user — they may have already left.",
+                "⚠️ Ban failed. Please try again.",
             )
 
 
@@ -925,19 +927,7 @@ class HITLFalseAlarmButton(
                 FALSE_POSITIVES.set(get_stat('false_positives'))
             strikes.clear(self.guild_id, self.user_id)
         except Exception as e:
-            logging.error(f"Error recording false-alarm decision: {e}")
-            _release_review_claim(
-                guild_id=self.guild_id,
-                message_id=self.message_id,
-                user_id=self.user_id,
-                decision="false_alarm",
-                decided_by=interaction.user.id,
-            )
-            await _edit_review_message(
-                interaction,
-                "⚠️ Failed to record decision. Please try again.",
-            )
-            return
+            logging.error(f"Error recording false-alarm training example: {e}")
 
         unban_note = "No auto-ban to reverse."
         if take_reversible_auto_ban(self.guild_id, self.user_id, self.message_id):
@@ -956,7 +946,18 @@ class HITLFalseAlarmButton(
                     e,
                 )
                 record_auto_ban(self.guild_id, self.user_id, self.message_id)
-                unban_note = "Could not unban automatically."
+                _release_review_claim(
+                    guild_id=self.guild_id,
+                    message_id=self.message_id,
+                    user_id=self.user_id,
+                    decision="false_alarm",
+                    decided_by=interaction.user.id,
+                )
+                await _edit_review_message(
+                    interaction,
+                    "⚠️ Could not unban automatically. Please try again.",
+                )
+                return
 
         await _edit_review_message(
             interaction,
@@ -995,9 +996,12 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
 
     if is_admin:
         text = _message_text(message)
-        _record_training_example(text, "BAN")
-        increment_stat('false_negatives')
-        FALSE_NEGATIVES.set(get_stat('false_negatives'))
+        try:
+            _record_training_example(text, "BAN")
+            increment_stat('false_negatives')
+            FALSE_NEGATIVES.set(get_stat('false_negatives'))
+        except Exception as e:
+            logging.error(f"Training persistence failed for admin report: {e}")
         try:
             await message.delete()
             await _execute_ban(
@@ -1008,7 +1012,10 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
             await interaction.followup.send("✅ User banned.", ephemeral=True)
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
-            await interaction.followup.send("✅ Added to training examples. Could not ban user.", ephemeral=True)
+            await interaction.followup.send(
+                "⚠️ Could not ban user. Please retry or ban manually.",
+                ephemeral=True,
+            )
     else:
         text = _message_text(message)
         images = await _snapshot_images(message)
@@ -1115,19 +1122,7 @@ class ReportConfirmButton(
             increment_stat('false_negatives')
             FALSE_NEGATIVES.set(get_stat('false_negatives'))
         except Exception as e:
-            logging.error(f"Error recording report ban decision: {e}")
-            _release_review_claim(
-                guild_id=self.guild_id,
-                message_id=self.message_id,
-                user_id=self.user_id,
-                decision="ban",
-                decided_by=interaction.user.id,
-            )
-            await _edit_review_message(
-                interaction,
-                "⚠️ Failed to record decision. Please try again.",
-            )
-            return
+            logging.error(f"Error recording report ban training example: {e}")
         try:
             channel = guild.get_channel(self.channel_id)
             if channel:
@@ -1148,9 +1143,16 @@ class ReportConfirmButton(
             )
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
+            _release_review_claim(
+                guild_id=self.guild_id,
+                message_id=self.message_id,
+                user_id=self.user_id,
+                decision="ban",
+                decided_by=interaction.user.id,
+            )
             await _edit_review_message(
                 interaction,
-                "✅ Could not ban user — they may have already left.",
+                "⚠️ Ban failed. Please try again.",
             )
 
 

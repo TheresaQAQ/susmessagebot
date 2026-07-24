@@ -34,11 +34,15 @@ def load_blocklist() -> None:
     global _blocklist
     try:
         response = requests.get(BLOCKLIST_URL, timeout=10)
+        response.raise_for_status()
         domains = set()
         for line in response.text.splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 domains.add(line.lower())
+        if not domains:
+            logging.error("Blocklist refresh returned no domains; keeping previous cache")
+            return
         _blocklist = domains
     except Exception as e:
         logging.error(f"Failed to load blocklist: {e}")

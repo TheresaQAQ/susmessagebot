@@ -44,15 +44,26 @@ def remove_notice_text(scope_id: int, user_id: int) -> str:
     )
 
 
-def ban_notice_text(appeal_discord_user_id: str = "") -> str:
+def ban_notice_text(
+    appeal_discord_user_id: str = "",
+    *,
+    automatic: bool = False,
+) -> str:
     """Trilingual ban notice; optionally includes a Discord user ID to add for appeals."""
-    text = (
-        "🚫 你因短时间内多次触发风控，已被机器人自动封禁。\n"
-        "You were automatically banned for triggering risk control multiple times "
-        "in a short period.\n"
-        "Вы были автоматически заблокированы за многократное срабатывание системы "
-        "защиты за короткое время."
-    )
+    if automatic:
+        text = (
+            "🚫 你因短时间内多次触发风控，已被机器人自动封禁。\n"
+            "You were automatically banned for triggering risk control multiple times "
+            "in a short period.\n"
+            "Вы были автоматически заблокированы за многократное срабатывание системы "
+            "защиты за короткое время."
+        )
+    else:
+        text = (
+            "🚫 你因违反社区规则已被管理员确认封禁。\n"
+            "You were banned after a moderator confirmed a community-rule violation.\n"
+            "Вы были заблокированы после подтверждения нарушения правил модератором."
+        )
     uid = (appeal_discord_user_id or "").strip()
     if uid:
         text += (

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from susmessagebot import bot as bot_discord
 from susmessagebot import moderator, seeds, stats, url_moderator
-from susmessagebot.strike_tracker import StrikeTracker
+from susmessagebot.strike_tracker import StrikeTracker, ban_notice_text
 
 
 class UrlModeratorRegressionTests(unittest.TestCase):
@@ -38,6 +38,19 @@ class UrlModeratorRegressionTests(unittest.TestCase):
             url_moderator.analyze_urls("See HTTPS://evil.example/path"),
             "BAN",
         )
+
+    @patch("susmessagebot.url_moderator.requests.get")
+    def test_blocklist_refresh_keeps_cache_on_http_error(self, get):
+        url_moderator._blocklist = {"evil.example"}
+        get.return_value = SimpleNamespace(
+            status_code=500,
+            text="error",
+            raise_for_status=MagicMock(side_effect=RuntimeError("500")),
+        )
+
+        url_moderator.load_blocklist()
+
+        self.assertEqual(url_moderator._blocklist, {"evil.example"})
 
     @patch("susmessagebot.url_moderator._classify_url_with_llm", return_value="BAN")
     def test_invite_domains_are_reviewed(self, classify_url):
@@ -695,7 +708,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
         finally:
             stats.DB_PATH = old_db_path
 
-    async def test_failed_hitl_side_effects_release_claim_for_retry(self):
+    async def test_failed_ban_enforcement_releases_claim_for_retry(self):
         old_db_path = stats.DB_PATH
         try:
             with tempfile.NamedTemporaryFile(suffix=".db") as db:
@@ -717,17 +730,19 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 button = bot_discord.HITLBanButton(1, 7, 42, 9)
 
                 with (
+                    patch.object(bot_discord, "add_example"),
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "get_stat", return_value=1),
                     patch.object(
                         bot_discord,
-                        "add_example",
-                        side_effect=RuntimeError("chroma down"),
+                        "_execute_ban",
+                        AsyncMock(side_effect=RuntimeError("discord down")),
                     ),
-                    patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
                 ):
                     await button.callback(interaction)
 
                 self.assertIsNone(stats.get_review_decision(1, 42, 7))
-                execute_ban.assert_not_awaited()
                 body = interaction.edit_original_response.await_args.kwargs["content"]
                 self.assertIn("try again", body.lower())
 
@@ -794,6 +809,17 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
 
         add_example.assert_not_called()
         sync.assert_not_called()
+
+
+class BanNoticeTests(unittest.TestCase):
+    def test_manual_ban_notice_is_not_auto_ban_copy(self):
+        text = ban_notice_text(automatic=False)
+        self.assertIn("moderator confirmed", text.lower())
+        self.assertNotIn("automatically banned", text.lower())
+
+    def test_automatic_ban_notice_mentions_auto_ban(self):
+        text = ban_notice_text(automatic=True)
+        self.assertIn("automatically banned", text.lower())
 
 
 class StrikePersistenceTests(unittest.TestCase):
