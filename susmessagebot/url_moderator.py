@@ -3,10 +3,10 @@ import logging
 import requests
 from urllib.parse import urlparse
 from openai import OpenAI
+from . import config
 from .config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
-    SILICONFLOW_MODEL,
 )
 from .llm_utils import should_disable_thinking
 
@@ -73,8 +73,9 @@ def _is_on_blocklist(domain: str) -> bool:
 def _classify_url_with_llm(url: str) -> str:
     """Use SiliconFlow to classify a URL as SAFE, BAN, or REVIEW."""
     try:
+        model = config.SILICONFLOW_MODEL
         create_kwargs = {
-            "model": SILICONFLOW_MODEL,
+            "model": model,
             "messages": [
                 {
                     "role": "user",
@@ -99,7 +100,7 @@ Respond with exactly one word: SAFE or BAN"""
             "max_tokens": 64,
             "temperature": 0,
         }
-        if should_disable_thinking(SILICONFLOW_MODEL):
+        if should_disable_thinking(model):
             create_kwargs["extra_body"] = {"enable_thinking": False}
         response = client.chat.completions.create(**create_kwargs)
         message_obj = response.choices[0].message

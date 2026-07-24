@@ -42,7 +42,7 @@ class UrlModeratorRegressionTests(unittest.TestCase):
             "BAN",
         )
 
-    @patch("susmessagebot.url_moderator.SILICONFLOW_MODEL", "THUDM/GLM-4.6")
+    @patch("susmessagebot.config.SILICONFLOW_MODEL", "THUDM/GLM-4.6")
     @patch("susmessagebot.url_moderator.client.chat.completions.create")
     def test_url_moderator_disables_thinking_for_glm_models(self, create):
         create.return_value = SimpleNamespace(
@@ -61,6 +61,7 @@ class UrlModeratorRegressionTests(unittest.TestCase):
             create.call_args.kwargs.get("extra_body"),
             {"enable_thinking": False},
         )
+        self.assertEqual(create.call_args.kwargs.get("model"), "THUDM/GLM-4.6")
 
     @patch("susmessagebot.url_moderator.requests.get")
     def test_blocklist_refresh_keeps_cache_on_http_error(self, get):
@@ -969,6 +970,35 @@ class ThinkingFlagTests(unittest.TestCase):
             self.assertTrue(moderator._should_disable_thinking(model), model)
 
         self.assertFalse(should_disable_thinking("Qwen/Qwen2.5-7B-Instruct"))
+
+
+class ModelOverrideTests(unittest.TestCase):
+    @patch("susmessagebot.moderator.get_similar_examples", return_value="")
+    @patch("susmessagebot.moderator.render_prompt", return_value="rules")
+    @patch("susmessagebot.moderator.client.chat.completions.create")
+    def test_classify_message_reads_config_model_at_call_time(
+        self,
+        create,
+        render_prompt,
+        get_examples,
+    ):
+        from susmessagebot import config
+
+        create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning_content=None)
+                )
+            ]
+        )
+        previous = config.SILICONFLOW_MODEL
+        try:
+            config.SILICONFLOW_MODEL = "bakeoff/Override-Model"
+            self.assertEqual(moderator.classify_message("hello"), "SAFE")
+        finally:
+            config.SILICONFLOW_MODEL = previous
+
+        self.assertEqual(create.call_args.kwargs["model"], "bakeoff/Override-Model")
 
 
 class ExampleIdTests(unittest.TestCase):

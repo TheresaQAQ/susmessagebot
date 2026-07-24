@@ -415,8 +415,8 @@ def main() -> None:
 
     model = args.model or config.SILICONFLOW_MODEL
     if args.model:
+        # classify_message reads config.SILICONFLOW_MODEL at call time.
         config.SILICONFLOW_MODEL = args.model
-        moderator.SILICONFLOW_MODEL = args.model
 
     RESULTS_DIR = run_dir(prompt_id, run)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

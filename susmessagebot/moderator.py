@@ -7,11 +7,10 @@ import re
 from openai import OpenAI
 from PIL import Image
 
+from . import config
 from .config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
-    SILICONFLOW_MODEL,
-    SILICONFLOW_VISION_MODEL,
 )
 from .llm_utils import should_disable_thinking
 from .prompt_loader import DEFAULT_PROMPT_ID, render_prompt
@@ -45,7 +44,7 @@ def _parse_verdict(content: str, prefer_last: bool = False) -> str:
 
 
 def _should_disable_thinking(model: str | None = None) -> bool:
-    return should_disable_thinking(model or SILICONFLOW_MODEL)
+    return should_disable_thinking(model or config.SILICONFLOW_MODEL)
 
 
 def _verdict_from_response(response) -> tuple[str, str, str]:
@@ -96,8 +95,9 @@ def classify_message(message: str) -> str:
         examples = get_similar_examples(message)
         system_prompt = render_prompt(PROMPT_ID, examples)
 
+        model = config.SILICONFLOW_MODEL
         create_kwargs = {
-            "model": SILICONFLOW_MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"<message>{message}</message>"},
@@ -105,7 +105,7 @@ def classify_message(message: str) -> str:
             "max_tokens": 64,
             "temperature": 0,
         }
-        if _should_disable_thinking():
+        if _should_disable_thinking(model):
             create_kwargs["extra_body"] = {"enable_thinking": False}
 
         response = client.chat.completions.create(**create_kwargs)
@@ -113,7 +113,7 @@ def classify_message(message: str) -> str:
         logging.info(
             "classify_message prompt=%s model=%s raw=%r reasoning_tail=%r verdict=%s",
             PROMPT_ID,
-            SILICONFLOW_MODEL,
+            model,
             content[:80],
             str(reasoning)[-120:],
             result,
@@ -133,7 +133,7 @@ def classify_image(image_bytes: bytes) -> str:
         data_url = _image_to_data_url(image_bytes)
         # No text for RAG; keep the same rules prompt with empty examples.
         system_prompt = render_prompt(PROMPT_ID, "")
-        vision_model = SILICONFLOW_VISION_MODEL or SILICONFLOW_MODEL
+        vision_model = config.SILICONFLOW_VISION_MODEL or config.SILICONFLOW_MODEL
         create_kwargs = {
             "model": vision_model,
             "messages": [
