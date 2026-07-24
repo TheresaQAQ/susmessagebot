@@ -23,6 +23,7 @@ from .stats import (
     get_stat,
     increment_stat,
     add_group,
+    remove_group,
     get_groups_count,
     get_total_members,
     claim_review_decision,
@@ -119,22 +120,40 @@ def init_metrics() -> None:
     MEMBERS_PROTECTED.set(get_total_members())
 
 
+def _refresh_guild_metrics() -> None:
+    GROUPS_COUNT.set(get_groups_count())
+    MEMBERS_PROTECTED.set(get_total_members())
+
+
 @client.event
 async def on_ready():
     global _bot_ready
     load_blocklist()
     for guild in client.guilds:
         add_group(guild.id, guild.member_count)
-    GROUPS_COUNT.set(get_groups_count())
-    MEMBERS_PROTECTED.set(get_total_members())
+    _refresh_guild_metrics()
     _bot_ready = True
     logging.info(f"Bot ready — logged in as {client.user}")
+
+
+@client.event
+async def on_disconnect():
+    global _bot_ready
+    _bot_ready = False
+    logging.warning("Discord gateway disconnected; health will report NOT_READY")
+
+
+@client.event
+async def on_resumed():
+    global _bot_ready
+    _bot_ready = True
+    logging.info("Discord gateway resumed")
+
 
 @client.event
 async def on_guild_join(guild: discord.Guild):
     add_group(guild.id, guild.member_count)
-    GROUPS_COUNT.set(get_groups_count())
-    MEMBERS_PROTECTED.set(get_total_members())
+    _refresh_guild_metrics()
     logging.info(f"Joined new server: {guild.name} ({guild.id}) with {guild.member_count} members")
 
     channel = guild.system_channel or next(
@@ -151,6 +170,27 @@ async def on_guild_join(guild: discord.Guild):
             "✅ Read Message History\n\n"
             "Once set up, I'll automatically moderate scam messages and protect your group!"
         )
+
+
+@client.event
+async def on_guild_remove(guild: discord.Guild):
+    remove_group(guild.id)
+    _refresh_guild_metrics()
+    logging.info(f"Removed from server: {guild.name} ({guild.id})")
+
+
+@client.event
+async def on_member_join(member: discord.Member):
+    if member.guild:
+        add_group(member.guild.id, member.guild.member_count or 0)
+        _refresh_guild_metrics()
+
+
+@client.event
+async def on_member_remove(member: discord.Member):
+    if member.guild:
+        add_group(member.guild.id, member.guild.member_count or 0)
+        _refresh_guild_metrics()
 
 @client.event
 async def on_message(message: discord.Message):
@@ -191,6 +231,9 @@ async def on_message(message: discord.Message):
                 await message.channel.send("✅ User banned.")
             except Exception as e:
                 logging.error(f"Error banning reported user: {e}")
+                await message.channel.send(
+                    "✅ Added to training. Could not ban user."
+                )
         else:
             text = _message_text(reported_msg)
             images = await _snapshot_images(reported_msg)
@@ -200,6 +243,7 @@ async def on_message(message: discord.Message):
                 f"👤 Reported user: {reported_msg.author} (`{reported_msg.author.id}`)\n\n"
                 f"📝 Content:\n{preview}"
             )
+            notified = 0
             for admin in await _admin_members(message.guild):
                 try:
                     view = ReportReviewView(
@@ -211,8 +255,15 @@ async def on_message(message: discord.Message):
                         channel_id=reported_msg.channel.id,
                     )
                     await admin.send(body, view=view, files=_discord_files(images))
+                    notified += 1
                 except Exception as e:
                     logging.warning(f"Could not DM admin {admin.id}: {e}")
+            if notified:
+                await message.channel.send(f"✅ Report sent to {notified} admin(s).")
+            else:
+                await message.channel.send(
+                    "⚠️ Could not DM any admins — they may have DMs closed."
+                )
         return
 
     if message.author.guild_permissions.administrator:

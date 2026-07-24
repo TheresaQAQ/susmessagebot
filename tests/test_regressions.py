@@ -20,6 +20,25 @@ class UrlModeratorRegressionTests(unittest.TestCase):
         self.assertEqual(result, "REVIEW")
         create.assert_called_once()
 
+    def test_url_extraction_is_case_insensitive(self):
+        self.assertEqual(
+            url_moderator._extract_urls("See HTTPS://Evil.Example/path"),
+            ["HTTPS://Evil.Example/path"],
+        )
+
+    def test_domain_strips_port_for_blocklist(self):
+        self.assertEqual(
+            url_moderator._get_domain("https://evil.example:443/x"),
+            "evil.example",
+        )
+
+    @patch.object(url_moderator, "_blocklist", {"evil.example"})
+    def test_uppercase_scheme_blocklist_url_is_banned(self):
+        self.assertEqual(
+            url_moderator.analyze_urls("See HTTPS://evil.example/path"),
+            "BAN",
+        )
+
     @patch("susmessagebot.url_moderator._classify_url_with_llm", return_value="BAN")
     def test_invite_domains_are_reviewed(self, classify_url):
         result = url_moderator.analyze_urls(
@@ -115,6 +134,19 @@ class StatsRegressionTests(unittest.TestCase):
 
                 self.assertEqual(stats.get_groups_count(), 1)
                 self.assertEqual(stats.get_total_members(), 25)
+        finally:
+            stats.DB_PATH = old_db_path
+
+    def test_remove_group_drops_stale_guild_row(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.add_group(1, 10)
+                self.assertTrue(stats.remove_group(1))
+                self.assertEqual(stats.get_groups_count(), 0)
+                self.assertEqual(stats.get_total_members(), 0)
         finally:
             stats.DB_PATH = old_db_path
 
@@ -272,7 +304,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         ban_user.assert_awaited_once()
 
 
-class DiscordHealthRegressionTests(unittest.TestCase):
+class DiscordHealthRegressionTests(unittest.IsolatedAsyncioTestCase):
     class _FakeHealthHandler(bot_discord.HealthHandler):
         def __init__(self, path="/health"):
             self.path = path
@@ -311,6 +343,17 @@ class DiscordHealthRegressionTests(unittest.TestCase):
             handler.do_GET()
             self.assertEqual(handler.status, 200)
             self.assertEqual(handler.body, b"OK")
+        finally:
+            bot_discord._bot_ready = False
+
+    async def test_disconnect_marks_health_not_ready(self):
+        bot_discord._bot_ready = True
+        try:
+            await bot_discord.on_disconnect()
+            self.assertFalse(bot_discord.is_ready())
+            handler = self._FakeHealthHandler()
+            handler.do_GET()
+            self.assertEqual(handler.status, 503)
         finally:
             bot_discord._bot_ready = False
 

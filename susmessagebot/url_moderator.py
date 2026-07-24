@@ -20,7 +20,7 @@ _blocklist: set = set()
 
 BLOCKLIST_URL = "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains-online.txt"
 
-URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
+URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+', re.IGNORECASE)
 
 SAFE_DOMAINS = {
     "github.com", "youtube.com", "google.com", "linkedin.com",
@@ -50,9 +50,12 @@ def _extract_urls(text: str) -> list:
 
 
 def _get_domain(url: str) -> str:
-    """Extract domain from URL."""
+    """Extract hostname from URL (no port / userinfo)."""
     try:
-        return urlparse(url).netloc.lower().replace("www.", "")
+        host = (urlparse(url).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
     except Exception:
         return ""
 

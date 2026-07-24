@@ -204,6 +204,17 @@ def add_group(chat_id: int, member_count: int) -> bool:
     conn.close()
     return not exists
 
+
+def remove_group(chat_id: int) -> bool:
+    """Remove a group row. Returns True if a row was deleted."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM groups WHERE chat_id = ?', (chat_id,))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
 def update_group_member_count(chat_id: int, member_count: int):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

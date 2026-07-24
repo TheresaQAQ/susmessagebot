@@ -154,6 +154,8 @@ jobs:
             if [ -d chroma_db ] && [ ! -d data/chroma_db ]; then
               mv chroma_db data/chroma_db
             fi
+            # Container runs as UID 10001; bind-mounted ./data must be writable.
+            sudo chown -R 10001:10001 data
 
             PREVIOUS_IMAGE="$(docker inspect -f '{{.Config.Image}}' susmessagebot 2>/dev/null || true)"
 
