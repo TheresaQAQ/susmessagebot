@@ -1,9 +1,10 @@
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from susmessagebot import bot as bot_discord
-from susmessagebot import moderator, seeds, url_moderator
+from susmessagebot import moderator, seeds, stats, url_moderator
 from susmessagebot.strike_tracker import StrikeTracker
 
 
@@ -68,6 +69,23 @@ class SeedDataRegressionTests(unittest.TestCase):
         self.assertNotIn("", ban_messages)
         self.assertNotIn("hihi this is legit message", ban_messages)
         self.assertNotIn("final test", ban_messages)
+
+
+class StatsRegressionTests(unittest.TestCase):
+    def test_existing_group_member_count_is_refreshed(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+
+                self.assertTrue(stats.add_group(1, 10))
+                self.assertFalse(stats.add_group(1, 25))
+
+                self.assertEqual(stats.get_groups_count(), 1)
+                self.assertEqual(stats.get_total_members(), 25)
+        finally:
+            stats.DB_PATH = old_db_path
 
 
 class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):

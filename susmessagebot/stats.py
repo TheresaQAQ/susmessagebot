@@ -52,14 +52,19 @@ def init_groups_table():
     conn.close()
 
 def add_group(chat_id: int, member_count: int) -> bool:
-    """Add a new group. Returns True if it was a new group, False if already exists."""
+    """Add or refresh a group. Returns True if it was a new group."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT chat_id FROM groups WHERE chat_id = ?', (chat_id,))
     exists = cursor.fetchone()
     if not exists:
         cursor.execute('INSERT INTO groups (chat_id, member_count) VALUES (?, ?)', (chat_id, member_count))
-        conn.commit()
+    else:
+        cursor.execute('''
+            UPDATE groups SET member_count = ?, last_updated = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        ''', (member_count, chat_id))
+    conn.commit()
     conn.close()
     return not exists
 
