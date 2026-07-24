@@ -27,7 +27,6 @@ from .stats import (
     get_groups_count,
     get_total_members,
     claim_review_decision,
-    release_review_decision,
     get_review_decision_owner,
     store_review_evidence,
     get_review_evidence,
@@ -689,26 +688,6 @@ async def _claim_or_reject_review(
         ephemeral=True,
     )
     return None
-
-
-def _release_review_claim(
-    *,
-    guild_id: int,
-    message_id: int,
-    user_id: int,
-    decision: str,
-    decided_by: int,
-) -> None:
-    try:
-        release_review_decision(
-            guild_id,
-            message_id,
-            user_id,
-            decision,
-            decided_by,
-        )
-    except Exception as e:
-        logging.error(f"Failed to release review claim: {e}")
 
 
 async def _edit_review_message(
