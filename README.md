@@ -29,8 +29,7 @@ tests/          Regression tests
 6. Administrators choose **Delete & Ban**, **Delete**, or **False Alarm** from the review DM. The sender is notified only after an administrator deletes the message or chooses Delete & Ban.
 7. Admin feedback is used to update ChromaDB in real time and sync `susmessagebot/seeds.py` to the GitHub repository via the GitHub API — keeping the repository as the source of truth for all labelled examples. (Human-in-the-Loop)
 8. Every classification, ban, and false positive is tracked as a Prometheus metric, scraped by Grafana Alloy, and visualized in a live Grafana Cloud dashboard.
-9. Admins (or users pending admin approval) can report missed scams — adding them to ChromaDB, syncing to GitHub, and tracking as false negatives in the monitoring dashboard.
-10. Group and member counts are tracked automatically — every new group/server the bot is added to is recorded, with member counts updated daily.
+9. Group and member counts are tracked automatically — every new group/server the bot is added to is recorded, with member counts updated daily.
 
 # Tech Stack:
 
@@ -56,16 +55,6 @@ AI classifications do not accumulate short-window strikes and never trigger an a
 This means the bot gets smarter over time with every admin correction, without any manual retraining.
 
 _Credit: This HITL feedback idea was proposed by Dr Mo Yin, a very close and treasured friend of mine. Thank you for the the friendship!_
-
-## Reporting missed scams
-
-If the bot misses a scam (false negative), it can be manually reported:
-
-- Use the **Report to SusMessageBot** message context menu, or mention the bot while replying to the suspicious message.
-- **Admins** can immediately remove the message, ban the sender, and add the content to training examples.
-- **Non-admins** submit the message for administrator review through **✅ Confirm Ban** and **❌ Dismiss** buttons.
-
-False negatives are tracked separately in the monitoring dashboard.
 
 ## Additional Details:
 

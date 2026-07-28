@@ -959,35 +959,8 @@ class DiscordPermissionAuditRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_missing_reported_message_is_handled(self):
-        channel = SimpleNamespace(
-            fetch_message=AsyncMock(side_effect=RuntimeError("message gone")),
-            send=AsyncMock(),
-        )
-        message = SimpleNamespace(
-            author=SimpleNamespace(bot=False),
-            guild=SimpleNamespace(id=1),
-            channel=channel,
-            mentions=[bot_discord.client.user],
-            reference=SimpleNamespace(message_id=99),
-        )
-
-        await bot_discord.on_message(message)
-
-        channel.send.assert_awaited_once()
-
-    async def test_failed_admin_mention_enforcement_is_not_recorded(self):
-        reported = SimpleNamespace(
-            id=99,
-            author=SimpleNamespace(id=7),
-            content="scam",
-            attachments=[],
-            delete=AsyncMock(),
-        )
-        channel = SimpleNamespace(
-            fetch_message=AsyncMock(return_value=reported),
-            send=AsyncMock(),
-        )
+    async def test_reply_mention_is_not_treated_as_a_report(self):
+        channel = SimpleNamespace(fetch_message=AsyncMock())
         message = SimpleNamespace(
             author=SimpleNamespace(
                 bot=False,
@@ -999,128 +972,9 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
             reference=SimpleNamespace(message_id=99),
         )
 
-        with (
-            patch.object(
-                bot_discord,
-                "_execute_ban",
-                AsyncMock(side_effect=RuntimeError("discord down")),
-            ),
-            patch.object(bot_discord, "_record_admin_report_outcome") as record,
-        ):
-            await bot_discord.on_message(message)
+        await bot_discord.on_message(message)
 
-        record.assert_not_called()
-        channel.send.assert_awaited_once()
-        self.assertIn("Could not ban", channel.send.await_args.args[0])
-
-    async def test_failed_admin_context_report_is_not_recorded(self):
-        interaction = SimpleNamespace(
-            user=SimpleNamespace(
-                guild_permissions=SimpleNamespace(administrator=True),
-            ),
-            guild=SimpleNamespace(id=1),
-            response=SimpleNamespace(defer=AsyncMock()),
-            followup=SimpleNamespace(send=AsyncMock()),
-        )
-        message = SimpleNamespace(
-            author=SimpleNamespace(id=7),
-            content="scam",
-            attachments=[],
-            delete=AsyncMock(),
-        )
-
-        with (
-            patch.object(
-                bot_discord,
-                "_execute_ban",
-                AsyncMock(side_effect=RuntimeError("discord down")),
-            ),
-            patch.object(bot_discord, "_record_admin_report_outcome") as record,
-        ):
-            await bot_discord._handle_report(interaction, message)
-
-        record.assert_not_called()
-        interaction.followup.send.assert_awaited_once()
-        self.assertIn(
-            "Could not ban",
-            interaction.followup.send.await_args.args[0],
-        )
-
-    async def test_admin_context_report_still_deletes_and_bans(self):
-        guild = SimpleNamespace(id=1, name="Test Guild")
-        interaction = SimpleNamespace(
-            user=SimpleNamespace(
-                guild_permissions=SimpleNamespace(administrator=True),
-            ),
-            guild=guild,
-            response=SimpleNamespace(defer=AsyncMock()),
-            followup=SimpleNamespace(send=AsyncMock()),
-        )
-        author = SimpleNamespace(id=7)
-        message = SimpleNamespace(
-            id=42,
-            author=author,
-            channel=SimpleNamespace(name="ads"),
-            content="scam",
-            attachments=[],
-            delete=AsyncMock(),
-        )
-
-        with (
-            patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
-            patch.object(bot_discord, "_record_admin_report_outcome") as record,
-        ):
-            await bot_discord._handle_report(interaction, message)
-
-        message.delete.assert_awaited_once()
-        execute_ban.assert_awaited_once_with(
-            guild=guild,
-            user=author,
-            reason="Reported by admin",
-            channel_name="ads",
-            evidence_message_id=42,
-            evidence_text="scam",
-            evidence_images=[],
-        )
-        record.assert_called_once_with("scam")
-        self.assertIn("User banned", interaction.followup.send.await_args.args[0])
-
-    async def test_non_admin_context_report_still_only_notifies_admins(self):
-        guild = SimpleNamespace(id=1)
-        interaction = SimpleNamespace(
-            user=SimpleNamespace(
-                id=8,
-                guild_permissions=SimpleNamespace(administrator=False),
-            ),
-            guild=guild,
-            response=SimpleNamespace(defer=AsyncMock()),
-            followup=SimpleNamespace(send=AsyncMock()),
-        )
-        author = SimpleNamespace(id=7)
-        message = SimpleNamespace(
-            id=42,
-            author=author,
-            channel=SimpleNamespace(id=9, name="general"),
-            content="scam",
-            attachments=[],
-            delete=AsyncMock(),
-        )
-        admin = SimpleNamespace(id=10, send=AsyncMock())
-
-        with (
-            patch.object(bot_discord, "_snapshot_images", AsyncMock(return_value=[])),
-            patch.object(bot_discord, "_admin_members", AsyncMock(return_value=[admin])),
-            patch.object(bot_discord, "store_review_evidence") as store_evidence,
-            patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
-        ):
-            await bot_discord._handle_report(interaction, message)
-
-        message.delete.assert_not_awaited()
-        execute_ban.assert_not_awaited()
-        store_evidence.assert_called_once()
-        admin.send.assert_awaited_once()
-        self.assertIsInstance(admin.send.await_args.kwargs["view"], bot_discord.ReportReviewView)
-        self.assertIn("Report sent", interaction.followup.send.await_args.args[0])
+        channel.fetch_message.assert_not_awaited()
 
     async def test_admin_lookup_chunks_an_incomplete_member_cache(self):
         admin = SimpleNamespace(
@@ -1178,17 +1032,7 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
             message_id=3,
             channel_id=4,
         )
-        report = bot_discord.ReportReviewView(
-            guild_id=1,
-            user_id=2,
-            username="user",
-            text="content",
-            message_id=3,
-            channel_id=4,
-        )
-
         self.assertTrue(hitl.is_persistent())
-        self.assertTrue(report.is_persistent())
         self.assertEqual(
             [item.item.label for item in hitl.children],
             ["🚫 删除并封禁", "🗑️ 删除", "❌ 误报"],
@@ -1209,8 +1053,10 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
             bot_discord.HITLBanButton,
             bot_discord.HITLDeleteButton,
             bot_discord.HITLFalseAlarmButton,
-            bot_discord.ReportConfirmButton,
-            bot_discord.ReportDismissButton,
+        )
+        self.assertNotIn(
+            "Report to SusMessageBot",
+            [command.name for command in bot_discord.client.tree.get_commands()],
         )
 
 
@@ -1933,42 +1779,6 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
 
         add_example.assert_not_called()
         sync.assert_not_called()
-
-    async def test_report_confirm_counts_bans_confirmed_not_false_negatives(self):
-        old_db_path = stats.DB_PATH
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".db") as db:
-                stats.DB_PATH = db.name
-                stats.init_db()
-                stats.store_review_evidence(1, 42, 7, "scam text", "User report")
-
-                guild = SimpleNamespace(
-                    owner_id=10,
-                    get_member=MagicMock(
-                        return_value=SimpleNamespace(
-                            id=11,
-                            guild_permissions=SimpleNamespace(administrator=True),
-                        )
-                    ),
-                    get_channel=MagicMock(return_value=None),
-                )
-                interaction = self._admin_interaction(guild)
-                button = bot_discord.ReportConfirmButton(1, 7, 42, 9)
-                increment = MagicMock()
-
-                with (
-                    patch.object(bot_discord, "add_example"),
-                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
-                    patch.object(bot_discord, "increment_stat", increment),
-                    patch.object(bot_discord, "get_stat", return_value=1),
-                    patch.object(bot_discord, "_execute_ban", AsyncMock()),
-                ):
-                    await button.callback(interaction)
-
-                increment.assert_called_once_with("bans_confirmed")
-        finally:
-            stats.DB_PATH = old_db_path
-
 
 class BanNoticeTests(unittest.TestCase):
     def test_manual_ban_notice_is_not_auto_ban_copy(self):
