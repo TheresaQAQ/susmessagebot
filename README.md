@@ -1,6 +1,6 @@
 # susmessagebot
 
-An AI-powered Discord moderation bot that detects and bans scammers in real time using semantic understanding, RAG, and a Human-in-the-Loop feedback system.
+An AI-powered Discord moderation bot that detects suspected scams for real-time administrator review using semantic understanding, RAG, and a Human-in-the-Loop feedback system.
 
 ## Why
 
@@ -24,9 +24,9 @@ tests/          Regression tests
 1. `susmessagebot/bot.py` scans incoming Discord messages and image attachments.
 2. Incoming text is sent to `susmessagebot/moderator.py`, where it is first converted into an embedding (defined in `susmessagebot/vector_store.py`).
 3. Input text embedding is then compared with current existing labelled examples to retrieve most similar examples. (Retrieval-Augmented Generation)
-4. Examples and system prompt are in tandem fed to SiliconFlow (`Qwen/Qwen3.5-4B`), which will return a singular classification: `BAN` or `SAFE`.
-5. The bot acts on the classification — deleting the message and banning the user if `BAN`, doing nothing if `SAFE`.
-6. On every ban, admins are notified with two buttons: **✅ Correct Ban** or **❌ Wrong Ban**.
+4. Examples and system prompt are fed to SiliconFlow (`Qwen/Qwen3.5-4B`), which classifies content as `BAN`, `SAFE`, or `REVIEW` when moderation is unavailable.
+5. A `BAN` classification is sent to server administrators by DM with the original message left in place. The bot does not automatically delete, strike, or ban the sender.
+6. Administrators choose **Delete & Ban**, **Delete**, or **False Alarm** from the review DM. The sender is notified only after an administrator deletes the message or chooses Delete & Ban.
 7. Admin feedback is used to update ChromaDB in real time and sync `susmessagebot/seeds.py` to the GitHub repository via the GitHub API — keeping the repository as the source of truth for all labelled examples. (Human-in-the-Loop)
 8. Every classification, ban, and false positive is tracked as a Prometheus metric, scraped by Grafana Alloy, and visualized in a live Grafana Cloud dashboard.
 9. Admins (or users pending admin approval) can report missed scams — adding them to ChromaDB, syncing to GitHub, and tracking as false negatives in the monitoring dashboard.
@@ -45,10 +45,13 @@ tests/          Regression tests
 
 ## Human-in-the-Loop (HITL) Feedback System
 
-Every time the bot removes suspicious content, admins receive two review buttons by DM:
+Every time the bot flags suspicious content, admins receive three persistent review buttons by DM while the original message remains visible:
 
-- **✅ Correct Ban** — confirms the ban and adds the message as a `BAN` example to ChromaDB and `susmessagebot/seeds.py`
-- **❌ Wrong Ban** — marks it as a false positive, unbans the user, and adds the message as a `SAFE` example to ChromaDB and `susmessagebot/seeds.py`
+- **🚫 Delete & Ban** — deletes the original message, bans the sender, and adds the message as a `BAN` example
+- **🗑️ Delete** — deletes the original message without banning the sender and adds the message as a `BAN` example
+- **❌ False Alarm** — leaves the message and sender untouched and adds the message as a `SAFE` example
+
+AI classifications do not accumulate short-window strikes and never trigger an automatic ban. Deletion and ban actions happen only after an administrator chooses them.
 
 This means the bot gets smarter over time with every admin correction, without any manual retraining.
 

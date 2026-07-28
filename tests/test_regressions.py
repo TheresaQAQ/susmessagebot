@@ -816,6 +816,148 @@ class DiscordHealthRegressionTests(unittest.IsolatedAsyncioTestCase):
         refresh.assert_called_once_with()
 
 
+class DiscordPermissionAuditRegressionTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _permissions(**overrides):
+        values = {
+            "ban_members": True,
+            "view_channel": True,
+            "send_messages": True,
+            "send_messages_in_threads": True,
+            "read_message_history": True,
+            "manage_messages": True,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def _guild(self, *, channel_permissions=None):
+        member = SimpleNamespace(guild_permissions=self._permissions())
+        channel = SimpleNamespace(
+            id=9,
+            name="question",
+            permissions_for=MagicMock(
+                return_value=channel_permissions or self._permissions()
+            ),
+            send=AsyncMock(),
+        )
+        owner = SimpleNamespace(id=10, send=AsyncMock())
+        guild = SimpleNamespace(
+            id=1,
+            name="Annulus",
+            owner_id=10,
+            owner=owner,
+            me=member,
+            member_count=100,
+            system_channel=channel,
+            text_channels=[channel],
+            forums=[],
+        )
+        return guild, channel, owner
+
+    def test_permission_check_reports_effective_channel_overrides(self):
+        guild, _, _ = self._guild(
+            channel_permissions=self._permissions(manage_messages=False)
+        )
+
+        issues = bot_discord._guild_permission_issues(guild)
+
+        self.assertEqual(
+            issues,
+            ["#question (9): Manage Messages"],
+        )
+
+    def test_permission_check_reports_forum_overrides(self):
+        guild, _, _ = self._guild()
+        forum = SimpleNamespace(
+            id=12,
+            name="support",
+            permissions_for=MagicMock(
+                return_value=self._permissions(view_channel=False)
+            ),
+        )
+        guild.forums = [forum]
+
+        issues = bot_discord._guild_permission_issues(guild)
+
+        self.assertEqual(issues, ["#support (12): View Channel"])
+
+    def test_permission_check_requires_thread_messages(self):
+        guild, _, _ = self._guild(
+            channel_permissions=self._permissions(send_messages_in_threads=False)
+        )
+
+        issues = bot_discord._guild_permission_issues(guild)
+
+        self.assertEqual(
+            issues,
+            ["#question (9): Send Messages in Threads"],
+        )
+
+    async def test_permission_audit_logs_without_notifying_owner(self):
+        guild, _, owner = self._guild(
+            channel_permissions=self._permissions(manage_messages=False)
+        )
+        with patch.object(bot_discord.logging, "warning") as warning:
+            self.assertFalse(
+                await bot_discord._audit_guild_permissions(guild)
+            )
+
+        owner.send.assert_not_awaited()
+        warning.assert_called_once()
+        self.assertIn("Manage Messages", str(warning.call_args))
+
+    async def test_ready_audits_every_guild_without_failing_health(self):
+        guild, _, _ = self._guild()
+        audit = AsyncMock(return_value=False)
+        bot_discord._bot_ready = False
+        try:
+            with (
+                patch.object(
+                    type(bot_discord.client),
+                    "guilds",
+                    new_callable=PropertyMock,
+                    return_value=[guild],
+                ),
+                patch.object(bot_discord.asyncio, "to_thread", AsyncMock()),
+                patch.object(bot_discord, "_ensure_blocklist_refresh_task"),
+                patch.object(bot_discord, "add_group"),
+                patch.object(bot_discord, "_refresh_guild_metrics"),
+                patch.object(bot_discord, "_audit_guild_permissions", audit),
+            ):
+                await bot_discord.on_ready()
+        finally:
+            bot_discord._bot_ready = False
+
+        audit.assert_awaited_once_with(guild)
+
+    async def test_guild_join_skips_unwritable_system_channel(self):
+        guild, writable, _ = self._guild()
+        blocked = SimpleNamespace(
+            id=8,
+            name="system",
+            permissions_for=MagicMock(
+                return_value=self._permissions(send_messages=False)
+            ),
+            send=AsyncMock(),
+        )
+        guild.system_channel = blocked
+        guild.text_channels = [blocked, writable]
+
+        with (
+            patch.object(bot_discord, "add_group"),
+            patch.object(bot_discord, "_refresh_guild_metrics"),
+            patch.object(
+                bot_discord,
+                "_audit_guild_permissions",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            await bot_discord.on_guild_join(guild)
+
+        blocked.send.assert_not_awaited()
+        writable.send.assert_awaited_once()
+
+
 class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_reported_message_is_handled(self):
         channel = SimpleNamespace(
@@ -904,6 +1046,76 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
             interaction.followup.send.await_args.args[0],
         )
 
+    async def test_admin_context_report_still_deletes_and_bans(self):
+        guild = SimpleNamespace(id=1)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            guild=guild,
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        author = SimpleNamespace(id=7)
+        message = SimpleNamespace(
+            author=author,
+            content="scam",
+            attachments=[],
+            delete=AsyncMock(),
+        )
+
+        with (
+            patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
+            patch.object(bot_discord, "_record_admin_report_outcome") as record,
+        ):
+            await bot_discord._handle_report(interaction, message)
+
+        message.delete.assert_awaited_once()
+        execute_ban.assert_awaited_once_with(
+            guild=guild,
+            user=author,
+            reason="Reported by admin",
+        )
+        record.assert_called_once_with("scam")
+        self.assertIn("User banned", interaction.followup.send.await_args.args[0])
+
+    async def test_non_admin_context_report_still_only_notifies_admins(self):
+        guild = SimpleNamespace(id=1)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=8,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+            guild=guild,
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        author = SimpleNamespace(id=7)
+        message = SimpleNamespace(
+            id=42,
+            author=author,
+            channel=SimpleNamespace(id=9, name="general"),
+            content="scam",
+            attachments=[],
+            delete=AsyncMock(),
+        )
+        admin = SimpleNamespace(id=10, send=AsyncMock())
+
+        with (
+            patch.object(bot_discord, "_snapshot_images", AsyncMock(return_value=[])),
+            patch.object(bot_discord, "_admin_members", AsyncMock(return_value=[admin])),
+            patch.object(bot_discord, "store_review_evidence") as store_evidence,
+            patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
+        ):
+            await bot_discord._handle_report(interaction, message)
+
+        message.delete.assert_not_awaited()
+        execute_ban.assert_not_awaited()
+        store_evidence.assert_called_once()
+        admin.send.assert_awaited_once()
+        self.assertIsInstance(admin.send.await_args.kwargs["view"], bot_discord.ReportReviewView)
+        self.assertIn("Report sent", interaction.followup.send.await_args.args[0])
+
     async def test_admin_lookup_chunks_an_incomplete_member_cache(self):
         admin = SimpleNamespace(
             id=10,
@@ -971,6 +1183,10 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(hitl.is_persistent())
         self.assertTrue(report.is_persistent())
+        self.assertEqual(
+            [item.item.label for item in hitl.children],
+            ["🚫 删除并封禁", "🗑️ 删除", "❌ 误报"],
+        )
 
     async def test_setup_registers_dynamic_review_components(self):
         with (
@@ -983,11 +1199,17 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_discord.client.setup_hook()
 
-        register.assert_called_once()
+        register.assert_called_once_with(
+            bot_discord.HITLBanButton,
+            bot_discord.HITLDeleteButton,
+            bot_discord.HITLFalseAlarmButton,
+            bot_discord.ReportConfirmButton,
+            bot_discord.ReportDismissButton,
+        )
 
 
 class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_delete_failure_still_notifies_admins_and_user(self):
+    async def test_ai_ban_only_notifies_admins(self):
         author = SimpleNamespace(id=7)
         guild = SimpleNamespace(id=1, name="Test Guild")
         channel = SimpleNamespace(id=9, name="general")
@@ -998,23 +1220,24 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
             channel=channel,
             content="scam",
             attachments=[],
-            delete=AsyncMock(side_effect=RuntimeError("missing permissions")),
+            delete=AsyncMock(),
         )
         dm_admins = AsyncMock(return_value=1)
         dm_user = AsyncMock()
+        execute_ban = AsyncMock()
+        tracker = MagicMock()
 
-        with tempfile.NamedTemporaryFile(suffix=".db") as db:
-            tracker = StrikeTracker(threshold=3, db_path=db.name)
-            with (
-                patch.object(bot_discord, "strikes", tracker),
-                patch.object(bot_discord, "increment_stat"),
-                patch.object(bot_discord, "get_stat", return_value=0),
-                patch.object(bot_discord, "_dm_admins_review", dm_admins),
-                patch.object(bot_discord, "_dm_user", dm_user),
-            ):
-                await bot_discord._ban_user(message, reason="test")
+        with (
+            patch.object(bot_discord, "strikes", tracker),
+            patch.object(bot_discord, "increment_stat"),
+            patch.object(bot_discord, "get_stat", return_value=0),
+            patch.object(bot_discord, "_dm_admins_review", dm_admins),
+            patch.object(bot_discord, "_dm_user", dm_user),
+            patch.object(bot_discord, "_execute_ban", execute_ban),
+        ):
+            await bot_discord._ban_user(message, reason="test")
 
-        message.delete.assert_awaited_once()
+        message.delete.assert_not_awaited()
         dm_admins.assert_awaited_once_with(
             guild,
             channel_name="general",
@@ -1025,46 +1248,51 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
             channel_id=9,
             images=[],
             removed=False,
+            status="检测到可疑内容，等待管理员处理（消息未删除）",
         )
-        dm_user.assert_awaited_once()
-        self.assertIn("could not remove it automatically", dm_user.await_args.args[1])
+        dm_user.assert_not_awaited()
+        execute_ban.assert_not_awaited()
+        tracker.record.assert_not_called()
 
     async def test_discord_does_not_autoban_when_no_admin_can_review(self):
         execute_ban = AsyncMock()
+        dm_user = AsyncMock()
         author = SimpleNamespace(id=7)
         guild = SimpleNamespace(id=1, name="Test Guild")
         channel = SimpleNamespace(id=9, name="general")
+        messages = []
+        tracker = MagicMock()
 
-        with tempfile.NamedTemporaryFile(suffix=".db") as db:
-            tracker = StrikeTracker(threshold=3, db_path=db.name)
-            with (
-                patch.object(bot_discord, "strikes", tracker),
-                patch.object(bot_discord, "increment_stat"),
-                patch.object(bot_discord, "get_stat", return_value=0),
-                patch.object(bot_discord, "_dm_user", AsyncMock()),
-                patch.object(
-                    bot_discord,
-                    "_dm_admins_review",
-                    AsyncMock(return_value=0),
-                ),
-                patch.object(bot_discord, "_dm_admins_text", AsyncMock()),
-                patch.object(bot_discord, "_execute_ban", execute_ban),
-                patch.object(bot_discord, "add_example"),
-                patch.object(bot_discord, "sync_example_to_github"),
-            ):
-                for i in range(3):
-                    message = SimpleNamespace(
-                        id=100 + i,
-                        author=author,
-                        guild=guild,
-                        channel=channel,
-                        content="scam",
-                        attachments=[],
-                        delete=AsyncMock(),
-                    )
-                    await bot_discord._ban_user(message, reason="test")
+        with (
+            patch.object(bot_discord, "strikes", tracker),
+            patch.object(bot_discord, "increment_stat"),
+            patch.object(bot_discord, "get_stat", return_value=0),
+            patch.object(bot_discord, "_dm_user", dm_user),
+            patch.object(
+                bot_discord,
+                "_dm_admins_review",
+                AsyncMock(return_value=0),
+            ),
+            patch.object(bot_discord, "_execute_ban", execute_ban),
+        ):
+            for i in range(3):
+                message = SimpleNamespace(
+                    id=100 + i,
+                    author=author,
+                    guild=guild,
+                    channel=channel,
+                    content="scam",
+                    attachments=[],
+                    delete=AsyncMock(),
+                )
+                messages.append(message)
+                await bot_discord._ban_user(message, reason="test")
 
+        for message in messages:
+            message.delete.assert_not_awaited()
         execute_ban.assert_not_awaited()
+        dm_user.assert_not_awaited()
+        tracker.record.assert_not_called()
 
 
 class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
@@ -1084,6 +1312,45 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
             edit_original_response=AsyncMock(),
             message=SimpleNamespace(content=content),
         )
+
+    async def test_delete_reviewed_message_uses_cached_thread(self):
+        message = SimpleNamespace(delete=AsyncMock())
+        thread = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+        guild = SimpleNamespace(
+            get_channel_or_thread=MagicMock(return_value=thread),
+            fetch_channel=AsyncMock(),
+        )
+
+        result = await bot_discord._delete_reviewed_message(
+            guild,
+            channel_id=9,
+            message_id=42,
+        )
+
+        self.assertEqual(result, "deleted")
+        guild.get_channel_or_thread.assert_called_once_with(9)
+        guild.fetch_channel.assert_not_awaited()
+        thread.fetch_message.assert_awaited_once_with(42)
+        message.delete.assert_awaited_once()
+
+    async def test_delete_reviewed_message_fetches_uncached_thread(self):
+        message = SimpleNamespace(delete=AsyncMock())
+        thread = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+        guild = SimpleNamespace(
+            get_channel_or_thread=MagicMock(return_value=None),
+            fetch_channel=AsyncMock(return_value=thread),
+        )
+
+        result = await bot_discord._delete_reviewed_message(
+            guild,
+            channel_id=9,
+            message_id=42,
+        )
+
+        self.assertEqual(result, "deleted")
+        guild.fetch_channel.assert_awaited_once_with(9)
+        thread.fetch_message.assert_awaited_once_with(42)
+        message.delete.assert_awaited_once()
 
     async def test_second_admin_decision_is_rejected(self):
         old_db_path = stats.DB_PATH
@@ -1240,7 +1507,10 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                             guild_permissions=SimpleNamespace(administrator=True),
                         )
                     ),
-                    get_channel=MagicMock(return_value=None),
+                    get_channel_or_thread=MagicMock(return_value=None),
+                    fetch_channel=AsyncMock(
+                        side_effect=RuntimeError("channel unavailable")
+                    ),
                 )
                 interaction = self._admin_interaction(guild)
                 button = bot_discord.HITLBanButton(1, 7, 42, 9)
@@ -1262,7 +1532,7 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 add_example.assert_called_once_with("scam text", "BAN")
                 increment.assert_called_once_with("bans_confirmed")
                 body = interaction.edit_original_response.await_args.kwargs["content"]
-                self.assertIn("再点一次「封禁」", body)
+                self.assertIn("再点一次「删除并封禁」", body)
                 self.assertTrue(
                     interaction.edit_original_response.await_args.kwargs.get("keep_view")
                     or "view" not in interaction.edit_original_response.await_args.kwargs
@@ -1282,6 +1552,129 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 increment2.assert_not_called()
                 execute_ban2.assert_awaited_once()
                 self.assertEqual(stats.get_review_decision(1, 42, 7), "ban")
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_delete_only_removes_message_and_notifies_user(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
+
+                message = SimpleNamespace(delete=AsyncMock())
+                channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+                guild = SimpleNamespace(
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    get_channel_or_thread=MagicMock(return_value=channel),
+                )
+                interaction = self._admin_interaction(guild)
+                button = bot_discord.HITLDeleteButton(1, 7, 42, 9)
+                dm_user = AsyncMock()
+
+                with (
+                    patch.object(bot_discord, "add_example") as add_example,
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                    patch.object(bot_discord, "increment_stat") as increment,
+                    patch.object(bot_discord, "_dm_user", dm_user),
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
+                ):
+                    await button.callback(interaction)
+
+                message.delete.assert_awaited_once()
+                add_example.assert_called_once_with("scam text", "BAN")
+                increment.assert_not_called()
+                execute_ban.assert_not_awaited()
+                dm_user.assert_awaited_once()
+                self.assertEqual(stats.get_review_decision(1, 42, 7), "delete")
+                body = interaction.edit_original_response.await_args.kwargs["content"]
+                self.assertIn("未封禁用户", body)
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_delete_failure_releases_decision_for_another_admin(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
+
+                channel = SimpleNamespace(
+                    fetch_message=AsyncMock(side_effect=RuntimeError("discord down"))
+                )
+                guild = SimpleNamespace(
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    get_channel_or_thread=MagicMock(return_value=channel),
+                )
+                interaction = self._admin_interaction(guild)
+                button = bot_discord.HITLDeleteButton(1, 7, 42, 9)
+
+                with (
+                    patch.object(bot_discord, "add_example") as add_example,
+                    patch.object(bot_discord, "_dm_user", AsyncMock()) as dm_user,
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
+                ):
+                    await button.callback(interaction)
+
+                self.assertIsNone(stats.get_review_decision(1, 42, 7))
+                add_example.assert_not_called()
+                dm_user.assert_not_awaited()
+                execute_ban.assert_not_awaited()
+                body = interaction.edit_original_response.await_args.kwargs["content"]
+                self.assertIn("其他管理员也可以接手", body)
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_delete_and_ban_reports_partial_success(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
+
+                channel = SimpleNamespace(
+                    fetch_message=AsyncMock(side_effect=RuntimeError("missing permission"))
+                )
+                guild = SimpleNamespace(
+                    owner_id=10,
+                    get_member=MagicMock(
+                        return_value=SimpleNamespace(
+                            id=11,
+                            guild_permissions=SimpleNamespace(administrator=True),
+                        )
+                    ),
+                    get_channel_or_thread=MagicMock(return_value=channel),
+                )
+                interaction = self._admin_interaction(guild)
+                button = bot_discord.HITLBanButton(1, 7, 42, 9)
+
+                with (
+                    patch.object(bot_discord, "add_example"),
+                    patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                    patch.object(bot_discord, "increment_stat"),
+                    patch.object(bot_discord, "get_stat", return_value=1),
+                    patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban,
+                ):
+                    await button.callback(interaction)
+
+                execute_ban.assert_awaited_once()
+                body = interaction.edit_original_response.await_args.kwargs["content"]
+                self.assertIn("已封禁该用户，但消息删除失败", body)
         finally:
             stats.DB_PATH = old_db_path
 
@@ -1342,7 +1735,10 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                             guild_permissions=SimpleNamespace(administrator=True),
                         )
                     ),
-                    get_channel=MagicMock(return_value=None),
+                    get_channel_or_thread=MagicMock(return_value=None),
+                    fetch_channel=AsyncMock(
+                        side_effect=RuntimeError("channel unavailable")
+                    ),
                 )
                 interaction = self._admin_interaction(
                     guild,

@@ -11,7 +11,7 @@ from .config import (
 )
 from .github_sync import sync_example_to_github
 from .vector_store import add_example, ensure_normalized_index
-from .strike_tracker import strikes, remove_notice_text, ban_notice_text
+from .strike_tracker import strikes, ban_notice_text
 import logging
 import asyncio
 import io
@@ -28,6 +28,7 @@ from .stats import (
     get_total_members,
     claim_review_decision,
     get_review_decision_owner,
+    release_review_decision,
     store_review_evidence,
     get_review_evidence,
     get_review_reason,
@@ -51,6 +52,22 @@ intents.members = True
 _bot_ready = False
 _BLOCKLIST_REFRESH_SECONDS = 6 * 60 * 60
 _blocklist_refresh_task: asyncio.Task | None = None
+_REQUIRED_GUILD_PERMISSIONS = (
+    ("ban_members", "Ban Members"),
+)
+_REQUIRED_CHANNEL_PERMISSIONS = (
+    ("view_channel", "View Channel"),
+    ("send_messages", "Send Messages"),
+    ("send_messages_in_threads", "Send Messages in Threads"),
+    ("read_message_history", "Read Message History"),
+    ("manage_messages", "Manage Messages"),
+)
+_REQUIRED_FORUM_PERMISSIONS = (
+    ("view_channel", "View Channel"),
+    ("send_messages_in_threads", "Send Messages in Threads"),
+    ("read_message_history", "Read Message History"),
+    ("manage_messages", "Manage Messages"),
+)
 
 
 class SusMessageBot(discord.Client):
@@ -61,6 +78,7 @@ class SusMessageBot(discord.Client):
     async def setup_hook(self):
         self.add_dynamic_items(
             HITLBanButton,
+            HITLDeleteButton,
             HITLFalseAlarmButton,
             ReportConfirmButton,
             ReportDismissButton,
@@ -133,6 +151,60 @@ def _refresh_guild_metrics() -> None:
     MEMBERS_PROTECTED.set(get_total_members())
 
 
+def _guild_permission_issues(guild: discord.Guild) -> list[str]:
+    """Return missing effective permissions for guild message surfaces."""
+    member = guild.me
+    if member is None:
+        return ["Bot member information is unavailable"]
+
+    issues: list[str] = []
+    guild_missing = [
+        label
+        for attribute, label in _REQUIRED_GUILD_PERMISSIONS
+        if not getattr(member.guild_permissions, attribute, False)
+    ]
+    if guild_missing:
+        issues.append(f"Server role: {', '.join(guild_missing)}")
+
+    channel_groups = (
+        (guild.text_channels, _REQUIRED_CHANNEL_PERMISSIONS),
+        (guild.forums, _REQUIRED_FORUM_PERMISSIONS),
+    )
+    for channels, required_permissions in channel_groups:
+        for channel in channels:
+            permissions = channel.permissions_for(member)
+            missing = [
+                label
+                for attribute, label in required_permissions
+                if not getattr(permissions, attribute, False)
+            ]
+            if missing:
+                issues.append(
+                    f"#{channel.name} ({channel.id}): {', '.join(missing)}"
+                )
+    return issues
+
+
+async def _audit_guild_permissions(guild: discord.Guild) -> bool:
+    """Log a guild permission audit and return whether all checks passed."""
+    issues = _guild_permission_issues(guild)
+    if not issues:
+        logging.info(
+            "Permission check passed for guild %s (%s)",
+            guild.name,
+            guild.id,
+        )
+        return True
+
+    logging.warning(
+        "Permission check failed for guild %s (%s): %s",
+        guild.name,
+        guild.id,
+        "; ".join(issues),
+    )
+    return False
+
+
 async def _refresh_blocklist_periodically() -> None:
     """Refresh the malware blocklist while the bot process remains alive."""
     while True:
@@ -159,10 +231,28 @@ async def on_ready():
     global _bot_ready
     await asyncio.to_thread(load_blocklist)
     _ensure_blocklist_refresh_task()
+    permission_failures = 0
     for guild in client.guilds:
         add_group(guild.id, guild.member_count)
+        try:
+            permission_ok = await _audit_guild_permissions(guild)
+        except Exception as e:
+            permission_ok = False
+            logging.exception(
+                "Unexpected permission check failure for guild %s (%s): %s",
+                guild.name,
+                guild.id,
+                e,
+            )
+        if not permission_ok:
+            permission_failures += 1
     _refresh_guild_metrics()
     _bot_ready = True
+    logging.info(
+        "Startup permission check complete: %s/%s guild(s) need attention",
+        permission_failures,
+        len(client.guilds),
+    )
     logging.info(f"Bot ready — logged in as {client.user}")
 
 
@@ -186,19 +276,48 @@ async def on_guild_join(guild: discord.Guild):
     _refresh_guild_metrics()
     logging.info(f"Joined new server: {guild.name} ({guild.id}) with {guild.member_count} members")
 
-    channel = guild.system_channel or next(
-        (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None
+    permission_ok = await _audit_guild_permissions(guild)
+    candidates = [guild.system_channel, *guild.text_channels]
+    channel = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate is not None
+            and candidate.permissions_for(guild.me).view_channel
+            and candidate.permissions_for(guild.me).send_messages
+        ),
+        None,
     )
     if channel:
-        await channel.send(
-            "👋 Thanks for adding SusMessageBot! I am an AI Anti-Scam Moderation Bot!\n\n"
-            "Please ensure I have these permissions:\n"
-            "✅ Ban Members\n"
-            "✅ Manage Messages\n"
-            "✅ View Channels\n"
-            "✅ Send Messages\n"
-            "✅ Read Message History\n\n"
-            "Once set up, I'll automatically moderate scam messages and protect your group!"
+        status = (
+            "✅ Permission check passed."
+            if permission_ok
+            else "⚠️ Permission check found missing access; check the bot logs for details."
+        )
+        try:
+            await channel.send(
+                "👋 Thanks for adding SusMessageBot! I am an AI Anti-Scam Moderation Bot!\n\n"
+                f"{status}\n\n"
+                "Required permissions:\n"
+                "✅ Ban Members\n"
+                "✅ Manage Messages\n"
+                "✅ View Channels\n"
+                "✅ Send Messages\n"
+                "✅ Send Messages in Threads\n"
+                "✅ Read Message History"
+            )
+        except Exception as e:
+            logging.warning(
+                "Could not send setup message in guild %s (%s): %s",
+                guild.name,
+                guild.id,
+                e,
+            )
+    else:
+        logging.warning(
+            "No writable text channel available for setup message in guild %s (%s)",
+            guild.name,
+            guild.id,
         )
 
 
@@ -501,22 +620,6 @@ def _discord_files(images: list[tuple[str, bytes]] | None) -> list[discord.File]
     return [discord.File(io.BytesIO(data), filename=name) for name, data in images]
 
 
-async def _dm_admins_text(
-    guild: discord.Guild,
-    body: str,
-    *,
-    images: list[tuple[str, bytes]] | None = None,
-) -> int:
-    notified = 0
-    for admin in await _admin_members(guild):
-        try:
-            await admin.send(body, files=_discord_files(images))
-            notified += 1
-        except Exception as e:
-            logging.warning(f"Could not DM admin {admin.id}: {e}")
-    return notified
-
-
 async def _dm_admins_review(
     guild: discord.Guild,
     *,
@@ -612,85 +715,39 @@ async def _ban_user(
     reason: str,
     *,
     evidence_images: list[tuple[str, bytes]] | None = None,
-    record_strike: bool = True,
 ):
-    """Delete and request review; only confirmed classifications count as strikes."""
+    """Queue an AI BAN classification for admin review without enforcement."""
     increment_stat('messages_ban')
     MESSAGES_CLASSIFIED_BAN.set(get_stat('messages_ban'))
     author = message.author
     guild = message.guild
-    channel_name = getattr(message.channel, "name", "unknown")
-    message_id = message.id
-    channel_id = message.channel.id
-    content = _message_text(message)
-    images = evidence_images if evidence_images is not None else await _snapshot_images(message)
-
-    try:
-        await message.delete()
-    except Exception as e:
-        logging.error(f"Error deleting message: {e}")
-        deleted = False
-    else:
-        deleted = True
-
     if not guild:
         return
 
+    channel_name = getattr(message.channel, "name", "unknown")
+    content = _message_text(message)
+    images = evidence_images if evidence_images is not None else await _snapshot_images(message)
     notified = await _dm_admins_review(
         guild,
         channel_name=channel_name,
         author=author,
         content=content,
         reason=reason,
-        message_id=message_id,
-        channel_id=channel_id,
+        message_id=message.id,
+        channel_id=message.channel.id,
         images=images,
-        removed=deleted,
+        removed=False,
+        status="检测到可疑内容，等待管理员处理（消息未删除）",
     )
     if notified == 0:
         logging.error(
-            f"No admins notified for guild {guild.id} — "
-            "not recording a strike because no review path is available"
+            f"No admins notified for AI BAN in guild {guild.id} "
+            f"(message {message.id}, user {author.id})"
         )
-    elif record_strike:
-        should_autoban = strikes.record(guild.id, author.id)
-        if should_autoban:
-            threshold = strikes.threshold
-            window_min = strikes.window_seconds // 60
-            logging.info(f"Auto-ban after {threshold} reviewed triggers: user {author.id}")
-            # Do not treat machine auto-bans as admin-confirmed training/metrics.
-            # Admins can still confirm/false-alarm via the review DM.
-            record_auto_ban(guild.id, author.id, message_id)
-            try:
-                await _execute_ban(
-                    guild=guild,
-                    user=author,
-                    reason=f"Auto-ban: {reason}",
-                    preserve_auto_ban_record=True,
-                    automatic=True,
-                )
-            except Exception as e:
-                logging.error(f"Error auto-banning user: {e}")
-                clear_auto_ban(guild.id, author.id)
-                return
-            await _dm_admins_text(
-                guild,
-                f"🚫 已自动封禁 {author}（`{author.id}`），频道 **#{channel_name}**\n"
-                f"原因：{window_min} 分钟内累计 {threshold} 次已复核触发。\n\n"
-                f"📝 最近内容：\n{content[:1500]}{'...' if len(content) > 1500 else ''}",
-                images=images,
-            )
-            return
-
-    if deleted:
-        logging.info(f"Message removed (pending admin ban) for user {author.id}")
-        await _dm_user(author, remove_notice_text(guild.id, author.id))
     else:
-        logging.info(f"Message flagged but not removed (pending admin review) for user {author.id}")
-        await _dm_user(
-            author,
-            "⚠️ Your message was flagged for moderation review, but I could not "
-            "remove it automatically. Server admins have been notified.",
+        logging.info(
+            f"AI BAN queued for user {author.id} message {message.id} "
+            f"({notified} admin DM(s), no automatic enforcement)"
         )
 
 
@@ -794,6 +851,24 @@ def _interaction_review_text(
     return ""
 
 
+async def _delete_reviewed_message(
+    guild: discord.Guild,
+    *,
+    channel_id: int,
+    message_id: int,
+) -> str:
+    """Delete the reviewed message and return deleted or missing."""
+    try:
+        channel = guild.get_channel_or_thread(channel_id)
+        if channel is None:
+            channel = await guild.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+        await message.delete()
+    except discord.NotFound:
+        return "missing"
+    return "deleted"
+
+
 class HITLBanButton(
     discord.ui.DynamicItem[discord.ui.Button],
     template=(
@@ -814,7 +889,7 @@ class HITLBanButton(
         self.channel_id = channel_id
         super().__init__(
             discord.ui.Button(
-                label="🚫 封禁",
+                label="🚫 删除并封禁",
                 style=discord.ButtonStyle.danger,
                 custom_id=(
                     f"sm:h:b:{guild_id}:{user_id}:"
@@ -869,13 +944,16 @@ class HITLBanButton(
             except Exception as e:
                 logging.error(f"Error updating bans_confirmed metric: {e}")
         try:
-            channel = guild.get_channel(self.channel_id)
-            if channel:
-                try:
-                    msg = await channel.fetch_message(self.message_id)
-                    await msg.delete()
-                except Exception:
-                    pass
+            delete_state = await _delete_reviewed_message(
+                guild,
+                channel_id=self.channel_id,
+                message_id=self.message_id,
+            )
+        except Exception as e:
+            logging.warning(f"Could not delete message before ban: {e}")
+            delete_state = "failed"
+
+        try:
             user = await interaction.client.fetch_user(self.user_id)
             await _execute_ban(
                 guild=guild,
@@ -886,14 +964,136 @@ class HITLBanButton(
             logging.error(f"Error banning user: {e}")
             await _edit_review_message(
                 interaction,
-                "⚠️ 封禁失败，请再点一次「封禁」。",
+                "⚠️ 封禁失败，请再点一次「删除并封禁」。",
                 keep_view=True,
             )
             return
+        if delete_state == "deleted":
+            result = "🚫 已删除消息并封禁该用户。"
+        elif delete_state == "missing":
+            result = "🚫 原消息已不存在，已封禁该用户。"
+        else:
+            result = "⚠️ 已封禁该用户，但消息删除失败，请管理员手动删除。"
         try:
-            await _edit_review_message(interaction, "🚫 已封禁该用户。")
+            await _edit_review_message(interaction, result)
         except Exception as e:
             logging.error(f"Ban succeeded but review message edit failed: {e}")
+
+
+class HITLDeleteButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=(
+        r"sm:h:d:(?P<guild_id>[0-9]+):(?P<user_id>[0-9]+):"
+        r"(?P<message_id>[0-9]+):(?P<channel_id>[0-9]+)"
+    ),
+):
+    def __init__(
+        self,
+        guild_id: int,
+        user_id: int,
+        message_id: int,
+        channel_id: int,
+    ):
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.message_id = message_id
+        self.channel_id = channel_id
+        super().__init__(
+            discord.ui.Button(
+                label="🗑️ 删除",
+                style=discord.ButtonStyle.primary,
+                custom_id=(
+                    f"sm:h:d:{guild_id}:{user_id}:"
+                    f"{message_id}:{channel_id}"
+                ),
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(
+            guild_id=int(match["guild_id"]),
+            user_id=int(match["user_id"]),
+            message_id=int(match["message_id"]),
+            channel_id=int(match["channel_id"]),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        guild = await _require_interaction_admin(interaction, self.guild_id)
+        if not guild:
+            return
+        text = _interaction_review_text(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+        )
+        if not text:
+            await interaction.response.send_message(
+                "审核上下文不可用。",
+                ephemeral=True,
+            )
+            return
+        claim_state = await _claim_or_reject_review(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            decision="delete",
+        )
+        if not claim_state:
+            return
+        await interaction.response.defer()
+
+        try:
+            delete_state = await _delete_reviewed_message(
+                guild,
+                channel_id=self.channel_id,
+                message_id=self.message_id,
+            )
+        except Exception as e:
+            logging.error(f"Error deleting reviewed message: {e}")
+            try:
+                release_review_decision(
+                    self.guild_id,
+                    self.message_id,
+                    self.user_id,
+                    "delete",
+                    interaction.user.id,
+                )
+            except Exception as release_error:
+                logging.error(f"Could not release failed delete decision: {release_error}")
+            await _edit_review_message(
+                interaction,
+                "⚠️ 删除失败，请重试；其他管理员也可以接手处理。",
+                keep_view=True,
+            )
+            return
+
+        if claim_state == "new":
+            try:
+                _record_training_example(text, "BAN")
+            except Exception as e:
+                logging.error(f"Error recording delete training example: {e}")
+
+        if delete_state == "deleted":
+            try:
+                user = await interaction.client.fetch_user(self.user_id)
+                await _dm_user(
+                    user,
+                    "Your message was deleted after review by a server administrator. "
+                    "You were not banned.",
+                )
+            except Exception as e:
+                logging.warning(f"Could not notify user after admin deletion: {e}")
+            result = "🗑️ 已删除该消息，未封禁用户。"
+        else:
+            result = "ℹ️ 原消息已不存在，未封禁用户，也未发送删除通知。"
+
+        try:
+            await _edit_review_message(interaction, result)
+        except Exception as e:
+            logging.error(f"Delete succeeded but review message edit failed: {e}")
 
 
 class HITLFalseAlarmButton(
@@ -1037,6 +1237,9 @@ class HITLView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(
             HITLBanButton(guild_id, user_id, message_id, channel_id)
+        )
+        self.add_item(
+            HITLDeleteButton(guild_id, user_id, message_id, channel_id)
         )
         self.add_item(
             HITLFalseAlarmButton(guild_id, user_id, message_id, channel_id)
