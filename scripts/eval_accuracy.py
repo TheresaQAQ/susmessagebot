@@ -86,6 +86,31 @@ GOLD: list[tuple[str, str, str]] = [
     ("IG DM @boost4u_official for mythic carries, payment first", "BAN", "en-divert"),
     ("闲鱼店铺搜「星耀代肝」，下单后加旺旺转微信详谈", "BAN", "zh-divert"),
     ("Join our Facebook group for weekly giveaways, admin will DM invite link", "BAN", "en-divert"),
+    # ---- BAN: Russian ads / scams / evasion ----
+    ("Продаю 200к серы, цена 500 рублей, пишите в ЛС", "BAN", "ru-ad"),
+    ("100к голды за 300 рублей, оплата переводом, обращаться в личку", "BAN", "ru-ad"),
+    ("Продам игровой аккаунт с редкими скинами, цену обсудим в Telegram", "BAN", "ru-ad"),
+    ("Делаю быструю прокачку персонажей за деньги, принимаю заказы", "BAN", "ru-ad"),
+    ("Дешёвые читы без бана, пожизненный ключ после оплаты", "BAN", "ru-ad"),
+    ("Переходите в наш Telegram, там розыгрыши, бонусы и прайс на золото", "BAN", "ru-divert"),
+    ("Служба безопасности банка: карта заблокирована. Подтвердите данные: https://bank-check.example.invalid", "BAN", "ru-scam"),
+    ("Назовите шестизначный код из SMS, чтобы отменить подозрительный перевод", "BAN", "ru-scam"),
+    ("Переведите деньги на безопасный счёт, иначе их украдут мошенники", "BAN", "ru-scam"),
+    ("Вы выиграли смартфон! Для получения оплатите доставку 299 рублей", "BAN", "ru-scam"),
+    ("Удалённая работа: принимайте переводы на свою карту и отправляйте дальше, 10% оставляйте себе", "BAN", "ru-scam"),
+    ("Вложите 5000 рублей в криптовалюту и получите 300% прибыли за сутки", "BAN", "ru-scam"),
+    ("Ваш кредит одобрен, перед выдачей оплатите страховой взнос 2500 рублей", "BAN", "ru-scam"),
+    ("Посылка задержана таможней, срочно оплатите пошлину: https://delivery-pay.example.invalid", "BAN", "ru-scam"),
+    ("Получите бесплатные скины Steam, войдите в аккаунт: https://steam-gift.example.invalid", "BAN", "ru-scam"),
+    ("Привет, это я, у меня новый номер. Срочно одолжи 20 000 рублей", "BAN", "ru-scam"),
+    ("Набираю людей в закрытый инвестиционный клуб, доход гарантирован, осталось три места", "BAN", "ru-scam"),
+    ("Приватный видеочат для взрослых, оплата по минутам, пиши в личку", "BAN", "ru-nsfw"),
+    ("П р о д а ю  з о л о т о, дёшево, пиши в Л С", "BAN", "ru-evasion"),
+    ("Служба бeзопасности: срoчно пeреведите деньги на безопасный счёт", "BAN", "ru-evasion"),
+    ("Гарантия прибыли без риска, внесите депозит сегодня и получите выплату завтра", "BAN", "ru-scam"),
+    ("Работа из дома, доход 5000 долларов в неделю, для начала напишите менеджеру", "BAN", "ru-scam"),
+    ("Продам редкий игровой меч за реальные деньги, PayPal или крипта", "BAN", "ru-ad"),
+    ("Куплю ваши игровые аккаунты за наличные, высокая цена, WhatsApp только", "BAN", "ru-ad"),
     # ---- SAFE: normal game chat / LFG / discussion ----
     ("今晚有人一起打本吗，缺一个奶", "SAFE", "zh-lfg"),
     ("有没有人教我这个副本机制，老是灭团", "SAFE", "zh-chat"),
@@ -150,6 +175,31 @@ GOLD: list[tuple[str, str, str]] = [
     ("闲鱼别买号，容易被骗号被找回", "SAFE", "zh-meta"),
     ("Facebook marketplace listing for a used headset looks sketchy, skip it", "SAFE", "en-meta"),
     ("Instagram filter made my screenshot look cursed lol", "SAFE", "en-chat"),
+    # ---- SAFE: Russian game chat / benign money context / anti-scam ----
+    ("200к серы", "SAFE", "ru-game-currency"),
+    ("200 к серы", "SAFE", "ru-game-currency"),
+    ("200к серебра", "SAFE", "ru-game-currency"),
+    ("200 к серебра", "SAFE", "ru-game-currency"),
+    ("100к голды", "SAFE", "ru-game-currency"),
+    ("500к опыта", "SAFE", "ru-game-currency"),
+    ("Мне дали 200к серы", "SAFE", "ru-game-currency"),
+    ("Потратил 500к серы на новый танк", "SAFE", "ru-game-currency"),
+    ("За бой получил 100 тысяч серебра", "SAFE", "ru-game-currency"),
+    ("Фармлю серу на премиумном танке", "SAFE", "ru-game-currency"),
+    ("Не хватает 50к серебра на ремонт", "SAFE", "ru-game-currency"),
+    ("На игровом аукционе этот меч стоит 200к золота", "SAFE", "ru-game-currency"),
+    ("Продал ненужный лут торговцу и получил 30к монет", "SAFE", "ru-game-currency"),
+    ("Сколько золота дают за прохождение этого задания?", "SAFE", "ru-chat"),
+    ("Кто сегодня идёт в рейд? Нужен ещё один танк", "SAFE", "ru-lfg"),
+    ("После обновления игра тормозит, какие настройки поставить?", "SAFE", "ru-chat"),
+    ("Банк никогда не просит переводить деньги на безопасный счёт", "SAFE", "ru-meta"),
+    ("Вчера мне звонили мошенники и представлялись сотрудниками банка", "SAFE", "ru-meta"),
+    ("Никому не сообщайте пароль и код подтверждения из SMS", "SAFE", "ru-meta"),
+    ("Я перевёл другу деньги за ужин, он уже подтвердил получение", "SAFE", "ru-border"),
+    ("Купил подписку через официальный сайт игры, чек пришёл на почту", "SAFE", "ru-border"),
+    ("Не переходите по подозрительным ссылкам, даже если их прислал знакомый", "SAFE", "ru-meta"),
+    ("В чате опять рекламируют продажу золота, не верьте и жалуйтесь модераторам", "SAFE", "ru-meta"),
+    ("Бесплатные скины по неизвестной ссылке — это обычное мошенничество", "SAFE", "ru-meta"),
 ]
 
 _N_BAN = sum(1 for _, y, _ in GOLD if y == "BAN")
@@ -195,35 +245,27 @@ def load_done() -> dict[int, dict]:
     return done
 
 
+def _matches_current_case(row: dict | None, text: str, expected: str, tag: str) -> bool:
+    return bool(row) and (
+        row.get("text"), row.get("expected"), row.get("tag")
+    ) == (text, expected, tag)
+
+
 def append_result(row: dict) -> None:
     with RESULTS_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def classify_with_retry(text: str, retries: int = 5) -> str:
+def classify_with_retry(text: str) -> str:
     from susmessagebot.moderator import classify_message
 
-    delay = 5
-    last_error: Exception | None = None
-    for attempt in range(retries):
-        try:
-            verdict = classify_message(text)
-            if verdict == "REVIEW":
-                raise RuntimeError("classifier returned REVIEW")
-            return verdict
-        except Exception as e:
-            last_error = e
-            msg = str(e)
-            logging.warning("classify failed attempt=%s err=%s", attempt + 1, e)
-            if "free-models-per-day" in msg or ("Rate limit exceeded" in msg and "per-day" in msg):
-                raise RuntimeError(
-                    "Free daily quota exhausted. Wait for reset or add credits, then rerun with --resume."
-                ) from e
-            if attempt == retries - 1:
-                raise
-            time.sleep(delay)
-            delay = min(delay * 2, 60)
-    raise RuntimeError("unreachable") from last_error
+    verdict = classify_message(text)
+    if verdict == "REVIEW":
+        raise RuntimeError(
+            "Classifier returned REVIEW. Fix the provider or configuration error, "
+            "then rerun with --resume."
+        )
+    return verdict
 
 
 def summarize(rows: list[dict], prompt_id: str, run: int, model: str) -> None:
@@ -436,9 +478,12 @@ def main() -> None:
     rows: list[dict] = []
     ran = 0
     for idx, (text, expected, tag) in enumerate(GOLD):
-        if args.resume and idx in done:
-            rows.append(done[idx])
+        previous_row = done.get(idx)
+        if args.resume and _matches_current_case(previous_row, text, expected, tag):
+            rows.append(previous_row)
             continue
+        if args.resume and previous_row:
+            logging.warning("Resume row %s no longer matches the current corpus; rerunning", idx)
         if ran >= limit:
             break
 
@@ -467,7 +512,10 @@ def main() -> None:
 
     if args.resume:
         for idx, row in sorted(done.items()):
-            if all(r["index"] != idx for r in rows):
+            if idx >= len(GOLD) or any(r["index"] == idx for r in rows):
+                continue
+            text, expected, tag = GOLD[idx]
+            if _matches_current_case(row, text, expected, tag):
                 rows.append(row)
         rows.sort(key=lambda r: r["index"])
 
