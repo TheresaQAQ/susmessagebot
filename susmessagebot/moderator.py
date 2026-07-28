@@ -1,10 +1,13 @@
 import base64
 import io
 import logging
+import math
 import os
+import random
 import re
+import time
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI
 from PIL import Image
 
 from . import config
@@ -22,8 +25,15 @@ client = OpenAI(
     base_url=SILICONFLOW_BASE_URL,
     timeout=60.0,
 )
+_text_client = client.with_options(max_retries=0)
 
 PROMPT_ID = os.getenv("PROMPT_ID", DEFAULT_PROMPT_ID)
+_TEXT_REQUEST_TIMEOUT_SECONDS = 30.0
+_TEXT_REQUEST_RETRIES = 3
+_TEXT_RETRY_BASE_SECONDS = 2.0
+_TEXT_RETRY_MAX_SECONDS = 60.0
+_TEXT_RETRY_JITTER_RATIO = 0.25
+_NON_RETRYABLE_TEXT_STATUS_CODES = {400, 401, 403}
 _IMAGE_MAX_SIDE = 1568
 # Qwen3-VL rejects images with either side smaller than 28.
 _IMAGE_MIN_SIDE = 28
@@ -64,6 +74,71 @@ def _verdict_from_response(response) -> tuple[str, str, str]:
         if reasoned != "REVIEW":
             result = reasoned
     return result, content, reasoning
+
+
+def _extract_error_details(error: Exception) -> tuple[int | None, str, str]:
+    """Read both OpenAI-style and SiliconFlow-style error payloads."""
+    status_code = getattr(error, "status_code", None)
+    body = getattr(error, "body", None)
+    payload = body.get("error", body) if isinstance(body, dict) else body
+
+    code = ""
+    message = ""
+    if isinstance(payload, dict):
+        code = str(payload.get("code") or "")
+        message = str(payload.get("message") or "")
+    elif isinstance(payload, str):
+        message = payload
+
+    if isinstance(body, dict):
+        code = code or str(body.get("code") or "")
+        message = message or str(body.get("message") or "")
+
+    return status_code, code, message or str(error)
+
+
+def _is_retryable_text_error(error: Exception) -> bool:
+    if isinstance(error, APIConnectionError):
+        return True
+    if not isinstance(error, APIStatusError):
+        return False
+
+    status_code, _, _ = _extract_error_details(error)
+    return status_code not in _NON_RETRYABLE_TEXT_STATUS_CODES
+
+
+def _provider_retry_delay_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+
+    candidates = (
+        (headers.get("retry-after-ms"), 1000.0),
+        (headers.get("retry-after"), 1.0),
+    )
+    for raw_value, divisor in candidates:
+        if raw_value is None:
+            continue
+        try:
+            seconds = float(raw_value) / divisor
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            return min(seconds, _TEXT_RETRY_MAX_SECONDS)
+    return None
+
+
+def _text_retry_delay_seconds(error: Exception, failed_attempt: int) -> float:
+    provider_delay = _provider_retry_delay_seconds(error)
+    if provider_delay is not None:
+        return provider_delay
+
+    base_delay = min(
+        _TEXT_RETRY_BASE_SECONDS * (2 ** (failed_attempt - 1)),
+        _TEXT_RETRY_MAX_SECONDS,
+    )
+    return base_delay + random.uniform(0, base_delay * _TEXT_RETRY_JITTER_RATIO)
 
 
 def _image_to_data_url(image_bytes: bytes) -> str:
@@ -123,21 +198,61 @@ def classify_message(message: str) -> str:
         }
         if _should_disable_thinking(model):
             create_kwargs["extra_body"] = {"enable_thinking": False}
+    except Exception as e:
+        logging.error("Text classification setup error: %s", e)
+        return "REVIEW"
 
-        response = client.chat.completions.create(**create_kwargs)
-        result, content, reasoning = _verdict_from_response(response)
+    total_attempts = _TEXT_REQUEST_RETRIES + 1
+    for attempt in range(1, total_attempts + 1):
+        try:
+            response = _text_client.chat.completions.create(
+                **create_kwargs,
+                timeout=_TEXT_REQUEST_TIMEOUT_SECONDS,
+            )
+            result, content, reasoning = _verdict_from_response(response)
+        except Exception as e:
+            status_code, error_code, error_message = _extract_error_details(e)
+            retryable = _is_retryable_text_error(e)
+            if retryable and attempt < total_attempts:
+                delay = _text_retry_delay_seconds(e, attempt)
+                logging.warning(
+                    "Text classification request failed on attempt %s/%s "
+                    "status=%s code=%s error=%s; retrying in %.2fs",
+                    attempt,
+                    total_attempts,
+                    status_code,
+                    error_code or "-",
+                    error_message[:300],
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+            logging.error(
+                "Text classification request failed on attempt %s/%s "
+                "retryable=%s status=%s code=%s error=%s",
+                attempt,
+                total_attempts,
+                retryable,
+                status_code,
+                error_code or "-",
+                error_message[:300],
+            )
+            return "REVIEW"
+
         logging.info(
-            "classify_message prompt=%s model=%s raw=%r reasoning_tail=%r verdict=%s",
+            "classify_message prompt=%s model=%s attempt=%s/%s raw=%r "
+            "reasoning_tail=%r verdict=%s",
             PROMPT_ID,
             model,
+            attempt,
+            total_attempts,
             content[:80],
             str(reasoning)[-120:],
             result,
         )
         return result
-    except Exception as e:
-        logging.error("Text classification error: %s", e)
-        return "REVIEW"
+
+    return "REVIEW"
 
 
 def classify_image(image_bytes: bytes) -> str:

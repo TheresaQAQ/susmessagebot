@@ -4,14 +4,54 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
 
+import httpx
+from openai import (
+    APIConnectionError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
+
+from scripts import eval_accuracy
 from susmessagebot import bot as bot_discord
 from susmessagebot import github_sync, moderator, seeds, stats, url_moderator, utils
 from susmessagebot.llm_utils import should_disable_thinking
 from susmessagebot.strike_tracker import StrikeTracker, ban_notice_text
 from susmessagebot import vector_store
 from susmessagebot.vector_store import _example_id
+
+
+def _openai_status_error(error_type, status_code, message, *, headers=None):
+    request = httpx.Request(
+        "POST",
+        "https://api.siliconflow.cn/v1/chat/completions",
+    )
+    response = httpx.Response(
+        status_code,
+        request=request,
+        headers=headers,
+    )
+    body = {
+        "error": {
+            "message": message,
+            "type": "api_error",
+            "param": None,
+            "code": None,
+        }
+    }
+    return error_type(message, response=response, body=body)
+
+
+def _openai_connection_error(message="Connection failed"):
+    request = httpx.Request(
+        "POST",
+        "https://api.siliconflow.cn/v1/chat/completions",
+    )
+    return APIConnectionError(message=message, request=request)
 
 
 class UrlModeratorRegressionTests(unittest.TestCase):
@@ -108,7 +148,7 @@ class TextNormalizationTests(unittest.TestCase):
         self.assertEqual(utils.normalize_text("a\u200bb"), "ab")
 
     @patch.object(
-        moderator.client.chat.completions,
+        moderator._text_client.chat.completions,
         "create",
         return_value=SimpleNamespace(
             choices=[
@@ -214,7 +254,7 @@ class GithubSyncDedupTests(unittest.TestCase):
 
 class ClassifierFailureRegressionTests(unittest.TestCase):
     @patch.object(
-        moderator.client.chat.completions,
+        moderator._text_client.chat.completions,
         "create",
         side_effect=RuntimeError("API unavailable"),
     )
@@ -227,6 +267,231 @@ class ClassifierFailureRegressionTests(unittest.TestCase):
         create,
     ):
         self.assertEqual(moderator.classify_message("hello"), "REVIEW")
+        create.assert_called_once()
+
+    @patch.object(moderator, "render_prompt", return_value="rules")
+    @patch.object(moderator, "get_similar_examples", return_value="")
+    def test_text_api_retries_three_times_with_thirty_second_timeout(
+        self,
+        get_examples,
+        render_prompt,
+    ):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+        with patch.object(
+            moderator._text_client.chat.completions,
+            "create",
+            side_effect=[
+                _openai_connection_error("attempt 1"),
+                _openai_connection_error("attempt 2"),
+                _openai_connection_error("attempt 3"),
+                response,
+            ],
+        ) as create, patch.object(moderator.time, "sleep") as sleep, patch.object(
+            moderator.random,
+            "uniform",
+            return_value=0,
+        ):
+            self.assertEqual(
+                moderator.classify_message("hello"),
+                "SAFE",
+            )
+
+        self.assertEqual(moderator._text_client.max_retries, 0)
+        self.assertEqual(create.call_count, 4)
+        self.assertEqual(sleep.call_args_list, [call(2.0), call(4.0), call(8.0)])
+        self.assertTrue(
+            all(
+                call.kwargs["timeout"] == 30.0
+                for call in create.call_args_list
+            )
+        )
+
+    @patch.object(moderator, "render_prompt", return_value="rules")
+    @patch.object(moderator, "get_similar_examples", return_value="")
+    def test_explicit_siliconflow_configuration_errors_do_not_retry(
+        self,
+        get_examples,
+        render_prompt,
+    ):
+        errors = [
+            _openai_status_error(BadRequestError, 400, "Invalid temperature"),
+            _openai_status_error(AuthenticationError, 401, "Invalid API key"),
+            _openai_status_error(PermissionDeniedError, 403, "Insufficient balance"),
+        ]
+        for error in errors:
+            with self.subTest(status=error.status_code), patch.object(
+                moderator._text_client.chat.completions,
+                "create",
+                side_effect=error,
+            ) as create, patch.object(moderator.time, "sleep") as sleep:
+                self.assertEqual(moderator.classify_message("hello"), "REVIEW")
+
+            create.assert_called_once()
+            sleep.assert_not_called()
+
+    @patch.object(moderator, "render_prompt", return_value="rules")
+    @patch.object(moderator, "get_similar_examples", return_value="")
+    def test_minute_rate_limit_retries_with_provider_delay(
+        self,
+        get_examples,
+        render_prompt,
+    ):
+        rate_limit = _openai_status_error(
+            RateLimitError,
+            429,
+            "TPM rate limit exceeded",
+            headers={"retry-after-ms": "1500"},
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+        with patch.object(
+            moderator._text_client.chat.completions,
+            "create",
+            side_effect=[rate_limit, response],
+        ) as create, patch.object(moderator.time, "sleep") as sleep:
+            self.assertEqual(moderator.classify_message("hello"), "SAFE")
+
+        self.assertEqual(create.call_count, 2)
+        sleep.assert_called_once_with(1.5)
+
+    @patch.object(moderator, "render_prompt", return_value="rules")
+    @patch.object(moderator, "get_similar_examples", return_value="")
+    def test_all_rate_limits_retry(
+        self,
+        get_examples,
+        render_prompt,
+    ):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+        messages = [
+            "Rate limit exceeded for free-models-per-day",
+            "RPH rate limit exceeded",
+            "Request was rejected due to rate limiting",
+        ]
+        for message in messages:
+            error = _openai_status_error(RateLimitError, 429, message)
+            with self.subTest(message=message), patch.object(
+                moderator._text_client.chat.completions,
+                "create",
+                side_effect=[error, response],
+            ) as create, patch.object(moderator.time, "sleep") as sleep, patch.object(
+                moderator.random,
+                "uniform",
+                return_value=0,
+            ):
+                self.assertEqual(moderator.classify_message("hello"), "SAFE")
+
+            self.assertEqual(create.call_count, 2)
+            sleep.assert_called_once_with(2.0)
+
+    def test_top_level_siliconflow_error_payload_is_parsed(self):
+        request = httpx.Request(
+            "POST",
+            "https://api.siliconflow.cn/v1/chat/completions",
+        )
+        response = httpx.Response(429, request=request)
+        error = RateLimitError(
+            "Daily limit reached",
+            response=response,
+            body={
+                "code": 20001,
+                "message": "RPD rate limit exceeded",
+                "data": None,
+            },
+        )
+
+        self.assertEqual(
+            moderator._extract_error_details(error),
+            (429, "20001", "RPD rate limit exceeded"),
+        )
+        self.assertTrue(moderator._is_retryable_text_error(error))
+
+    @patch.object(moderator, "render_prompt", return_value="rules")
+    @patch.object(moderator, "get_similar_examples", return_value="")
+    def test_other_http_errors_retry(
+        self,
+        get_examples,
+        render_prompt,
+    ):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+        for status_code in (408, 404, 500, 502, 503, 504):
+            error = _openai_status_error(
+                InternalServerError,
+                status_code,
+                "Server overloaded",
+            )
+            with self.subTest(status=status_code), patch.object(
+                moderator._text_client.chat.completions,
+                "create",
+                side_effect=[error, response],
+            ) as create, patch.object(moderator.time, "sleep") as sleep, patch.object(
+                moderator.random,
+                "uniform",
+                return_value=0,
+            ):
+                self.assertEqual(moderator.classify_message("hello"), "SAFE")
+
+            self.assertEqual(create.call_count, 2)
+            sleep.assert_called_once_with(2.0)
+
+    def test_evaluation_does_not_add_caller_level_retries(self):
+        with patch(
+            "susmessagebot.moderator.classify_message",
+            return_value="REVIEW",
+        ) as classify:
+            with self.assertRaisesRegex(RuntimeError, "--resume"):
+                eval_accuracy.classify_with_retry("hello")
+
+        classify.assert_called_once_with("hello")
+
+
+class EvaluationResumeRegressionTests(unittest.TestCase):
+    def test_resume_reuses_only_the_same_evaluation_case(self):
+        row = {
+            "index": 62,
+            "text": "old safe case",
+            "expected": "SAFE",
+            "tag": "en-chat",
+        }
+
+        self.assertTrue(
+            eval_accuracy._matches_current_case(
+                row,
+                "old safe case",
+                "SAFE",
+                "en-chat",
+            )
+        )
+        self.assertFalse(
+            eval_accuracy._matches_current_case(
+                row,
+                "inserted ban case",
+                "BAN",
+                "ru-scam",
+            )
+        )
 
     def test_invalid_image_requests_manual_review(self):
         self.assertEqual(moderator.classify_image(b"not an image"), "REVIEW")
