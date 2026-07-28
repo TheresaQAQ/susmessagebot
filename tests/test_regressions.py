@@ -1885,7 +1885,7 @@ class ThinkingFlagTests(unittest.TestCase):
 class ModelOverrideTests(unittest.TestCase):
     @patch("susmessagebot.moderator.get_similar_examples", return_value="")
     @patch("susmessagebot.moderator.render_prompt", return_value="rules")
-    @patch("susmessagebot.moderator.client.chat.completions.create")
+    @patch("susmessagebot.moderator._text_client.chat.completions.create")
     def test_classify_message_reads_config_model_at_call_time(
         self,
         create,
