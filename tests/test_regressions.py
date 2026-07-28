@@ -1047,7 +1047,7 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_admin_context_report_still_deletes_and_bans(self):
-        guild = SimpleNamespace(id=1)
+        guild = SimpleNamespace(id=1, name="Test Guild")
         interaction = SimpleNamespace(
             user=SimpleNamespace(
                 guild_permissions=SimpleNamespace(administrator=True),
@@ -1058,7 +1058,9 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         author = SimpleNamespace(id=7)
         message = SimpleNamespace(
+            id=42,
             author=author,
+            channel=SimpleNamespace(name="ads"),
             content="scam",
             attachments=[],
             delete=AsyncMock(),
@@ -1075,6 +1077,10 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
             guild=guild,
             user=author,
             reason="Reported by admin",
+            channel_name="ads",
+            evidence_message_id=42,
+            evidence_text="scam",
+            evidence_images=[],
         )
         record.assert_called_once_with("scam")
         self.assertIn("User banned", interaction.followup.send.await_args.args[0])
@@ -1297,7 +1303,13 @@ class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def _admin_interaction(guild, *, user_id=11, content="📝 Content:\nscam text"):
+    def _admin_interaction(
+        guild,
+        *,
+        user_id=11,
+        content="📝 Content:\nscam text",
+        attachments=None,
+    ):
         return SimpleNamespace(
             client=SimpleNamespace(
                 get_guild=MagicMock(return_value=guild),
@@ -1310,8 +1322,128 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 defer=AsyncMock(),
             ),
             edit_original_response=AsyncMock(),
-            message=SimpleNamespace(content=content),
+            message=SimpleNamespace(content=content, attachments=attachments or []),
         )
+
+    async def test_image_only_review_hides_internal_placeholder(self):
+        admin = SimpleNamespace(id=10, send=AsyncMock())
+        author = SimpleNamespace(id=7)
+        guild = SimpleNamespace(id=1, name="Test Guild")
+
+        with (
+            patch.object(
+                bot_discord,
+                "_admin_members",
+                AsyncMock(return_value=[admin]),
+            ),
+            patch.object(bot_discord, "store_review_evidence") as store_evidence,
+        ):
+            notified = await bot_discord._dm_admins_review(
+                guild,
+                channel_name="ads",
+                author=author,
+                content="[image]",
+                reason="Suspicious image",
+                message_id=42,
+                channel_id=9,
+                images=[("proof.png", b"image")],
+                removed=False,
+                status="检测到可疑内容，等待管理员处理（消息未删除）",
+            )
+
+        self.assertEqual(notified, 1)
+        body = admin.send.await_args.args[0]
+        self.assertNotIn("[image]", body)
+        self.assertNotIn("📝 内容：", body)
+        self.assertEqual(
+            admin.send.await_args.kwargs["files"][0].filename,
+            "proof.png",
+        )
+        store_evidence.assert_called_once_with(
+            1,
+            42,
+            7,
+            "[image]",
+            "Suspicious image",
+        )
+
+    async def test_review_edit_retains_source_and_replaces_prior_status(self):
+        interaction = self._admin_interaction(
+            SimpleNamespace(),
+            content=(
+                "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
+                "｜**#ads**（Test Guild）\n\n"
+                "👤 用户：tester (`7`)\n\n"
+                "📝 内容：\nscam text"
+            ),
+        )
+
+        await bot_discord._edit_review_message(
+            interaction,
+            "🗑️ 已删除该消息，未封禁用户。",
+        )
+        first = interaction.edit_original_response.await_args.kwargs["content"]
+
+        self.assertIn("📌 处理状态：🗑️ 已删除该消息", first)
+        self.assertIn("📍 原始频道：**#ads**（Test Guild）", first)
+        self.assertIn("👤 用户：tester", first)
+        self.assertIn("📝 内容：\nscam text", first)
+        self.assertIsNone(
+            interaction.edit_original_response.await_args.kwargs["view"]
+        )
+
+        interaction.message.content = first
+        await bot_discord._edit_review_message(
+            interaction,
+            "⚠️ 删除失败，请重试。",
+            keep_view=True,
+        )
+        second = interaction.edit_original_response.await_args.kwargs["content"]
+        self.assertEqual(second.count("📌 处理状态："), 1)
+        self.assertIn("📍 原始频道：**#ads**（Test Guild）", second)
+        self.assertIn("📝 内容：\nscam text", second)
+        self.assertNotIn(
+            "view",
+            interaction.edit_original_response.await_args.kwargs,
+        )
+
+    async def test_ban_notice_compactly_identifies_original_image(self):
+        user = SimpleNamespace(id=7, send=AsyncMock())
+        guild = SimpleNamespace(
+            id=1,
+            name="Test Guild",
+            ban=AsyncMock(),
+        )
+        tracker = MagicMock()
+
+        with (
+            patch.object(bot_discord, "strikes", tracker),
+            patch.object(bot_discord, "clear_auto_ban"),
+        ):
+            await bot_discord._execute_ban(
+                guild=guild,
+                user=user,
+                reason="Confirmed by admin",
+                channel_name="ads",
+                evidence_message_id=42,
+                evidence_text="[image]",
+                evidence_images=[("proof.png", b"image")],
+            )
+
+        notice = user.send.await_args.args[0]
+        self.assertIn("Server: Test Guild", notice)
+        self.assertIn("Channel: #ads", notice)
+        self.assertIn("Message: See attached image", notice)
+        self.assertIn("Time: <t:1420070400:F>", notice)
+        self.assertLess(notice.index("Time:"), notice.index("Message:"))
+        self.assertNotIn("Original message ID", notice)
+        self.assertNotIn("proof.png", notice)
+        self.assertEqual(
+            user.send.await_args.kwargs["files"][0].filename,
+            "proof.png",
+        )
+        guild.ban.assert_awaited_once()
+        tracker.clear.assert_called_once_with(1, 7)
 
     async def test_delete_reviewed_message_uses_cached_thread(self):
         message = SimpleNamespace(delete=AsyncMock())
@@ -1564,8 +1696,13 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
 
                 message = SimpleNamespace(delete=AsyncMock())
-                channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+                channel = SimpleNamespace(
+                    name="ads",
+                    fetch_message=AsyncMock(return_value=message),
+                )
                 guild = SimpleNamespace(
+                    id=1,
+                    name="Test Guild",
                     owner_id=10,
                     get_member=MagicMock(
                         return_value=SimpleNamespace(
@@ -1575,7 +1712,21 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     get_channel_or_thread=MagicMock(return_value=channel),
                 )
-                interaction = self._admin_interaction(guild)
+                attachment = SimpleNamespace(
+                    filename="proof.png",
+                    content_type="image/png",
+                    read=AsyncMock(return_value=b"image"),
+                )
+                interaction = self._admin_interaction(
+                    guild,
+                    content=(
+                        "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
+                        "｜**#ads**（Test Guild）\n\n"
+                        "👤 用户：tester (`7`)\n\n"
+                        "📝 内容：\nscam text"
+                    ),
+                    attachments=[attachment],
+                )
                 button = bot_discord.HITLDeleteButton(1, 7, 42, 9)
                 dm_user = AsyncMock()
 
@@ -1593,9 +1744,23 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 increment.assert_not_called()
                 execute_ban.assert_not_awaited()
                 dm_user.assert_awaited_once()
+                notice = dm_user.await_args.args[1]
+                self.assertIn("Server: Test Guild", notice)
+                self.assertIn("Channel: #ads", notice)
+                self.assertIn("Message: scam text", notice)
+                self.assertIn("Time: <t:1420070400:F>", notice)
+                self.assertLess(notice.index("Time:"), notice.index("Message:"))
+                self.assertNotIn("Original message ID", notice)
+                self.assertNotIn("proof.png", notice)
+                self.assertEqual(
+                    dm_user.await_args.kwargs["images"],
+                    [("proof.png", b"image")],
+                )
                 self.assertEqual(stats.get_review_decision(1, 42, 7), "delete")
                 body = interaction.edit_original_response.await_args.kwargs["content"]
                 self.assertIn("未封禁用户", body)
+                self.assertIn("📍 原始频道：**#ads**（Test Guild）", body)
+                self.assertIn("📝 内容：\nscam text", body)
         finally:
             stats.DB_PATH = old_db_path
 

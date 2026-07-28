@@ -366,12 +366,22 @@ async def on_message(message: discord.Message):
 
         if is_admin:
             text = _message_text(reported_msg)
+            images = await _snapshot_images(reported_msg)
+            channel_name = getattr(
+                getattr(reported_msg, "channel", None),
+                "name",
+                getattr(message.channel, "name", "unknown"),
+            )
             try:
                 await reported_msg.delete()
                 await _execute_ban(
                     guild=message.guild,
                     user=reported_msg.author,
                     reason="Reported by admin",
+                    channel_name=channel_name,
+                    evidence_message_id=reported_msg.id,
+                    evidence_text=text,
+                    evidence_images=images,
                 )
             except Exception as e:
                 logging.error(f"Error banning reported user: {e}")
@@ -384,11 +394,10 @@ async def on_message(message: discord.Message):
         else:
             text = _message_text(reported_msg)
             images = await _snapshot_images(reported_msg)
-            preview = text if len(text) <= 1500 else text[:1500] + "..."
             body = (
                 f"🚨 用户举报：{message.author} 在 **#{message.channel.name}**\n\n"
-                f"👤 被举报用户：{reported_msg.author} (`{reported_msg.author.id}`)\n\n"
-                f"📝 内容：\n{preview}"
+                f"👤 被举报用户：{reported_msg.author} (`{reported_msg.author.id}`)"
+                f"{_review_content_block(text)}"
             )
             store_review_evidence(
                 message.guild.id,
@@ -525,11 +534,58 @@ async def _admin_members(guild: discord.Guild) -> list[discord.Member]:
     ]
 
 
-async def _dm_user(user: discord.abc.User, text: str) -> None:
+async def _dm_user(
+    user: discord.abc.User,
+    text: str,
+    *,
+    images: list[tuple[str, bytes]] | None = None,
+) -> None:
     try:
-        await user.send(text)
+        kwargs: dict = {"allowed_mentions": discord.AllowedMentions.none()}
+        if images:
+            kwargs["files"] = _discord_files(images)
+        await user.send(text, **kwargs)
     except Exception as e:
         logging.warning(f"Could not DM user {user.id}: {e}")
+
+
+def _user_notice_with_evidence(
+    notice: str,
+    *,
+    guild_name: str,
+    channel_name: str,
+    message_id: int | None,
+    content: str,
+    images: list[tuple[str, bytes]] | None = None,
+) -> str:
+    """Add a compact source summary to a moderation notice."""
+    original = (content or "").strip()
+    if original == "[image]" or (not original and images):
+        original = "See attached image"
+    elif original == "[empty]" or not original:
+        original = "No text content"
+    else:
+        original = " ".join(original.split())
+        if len(original) > 500:
+            original = original[:497] + "..."
+
+    sent_at = "Unknown"
+    if message_id is not None:
+        try:
+            sent_at = discord.utils.format_dt(
+                discord.utils.snowflake_time(message_id),
+                style="F",
+            )
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+    return (
+        f"{notice}\n\n"
+        f"Server: {guild_name}\n"
+        f"Channel: #{channel_name}\n"
+        f"Time: {sent_at}\n"
+        f"Message: {original}"
+    )[:2000]
 
 
 async def _execute_ban(
@@ -539,11 +595,26 @@ async def _execute_ban(
     reason: str,
     preserve_auto_ban_record: bool = False,
     automatic: bool = False,
+    channel_name: str | None = None,
+    evidence_message_id: int | None = None,
+    evidence_text: str | None = None,
+    evidence_images: list[tuple[str, bytes]] | None = None,
 ) -> None:
     """DM ban notice first (ban removes mutual servers), then ban and clear strikes."""
+    notice = ban_notice_text(APPEAL_DISCORD_USER_ID, automatic=automatic)
+    if evidence_text is not None or evidence_images:
+        notice = _user_notice_with_evidence(
+            notice,
+            guild_name=getattr(guild, "name", "Unknown server"),
+            channel_name=channel_name or "unknown",
+            message_id=evidence_message_id,
+            content=evidence_text or "",
+            images=evidence_images,
+        )
     await _dm_user(
         user,
-        ban_notice_text(APPEAL_DISCORD_USER_ID, automatic=automatic),
+        notice,
+        images=evidence_images,
     )
     await guild.ban(discord.Object(id=user.id), reason=reason)
     strikes.clear(guild.id, user.id)
@@ -620,6 +691,15 @@ def _discord_files(images: list[tuple[str, bytes]] | None) -> list[discord.File]
     return [discord.File(io.BytesIO(data), filename=name) for name, data in images]
 
 
+def _review_content_block(content: str) -> str:
+    """Render text evidence while hiding internal image/empty placeholders."""
+    cleaned = (content or "").strip()
+    if cleaned in {"", "[image]", "[empty]"}:
+        return ""
+    preview = cleaned if len(cleaned) <= 1500 else cleaned[:1500] + "..."
+    return f"\n\n📝 内容：\n{preview}"
+
+
 async def _dm_admins_review(
     guild: discord.Guild,
     *,
@@ -635,7 +715,6 @@ async def _dm_admins_review(
 ) -> int:
     """Send full content + Ban/False Alarm buttons to each admin via DM. Returns how many DMs succeeded."""
     store_review_evidence(guild.id, message_id, author.id, content, reason)
-    preview = content if len(content) <= 1500 else content[:1500] + "..."
     if status is None:
         status = (
             "可疑内容已删除"
@@ -644,8 +723,8 @@ async def _dm_admins_review(
         )
     body = (
         f"⚠️ {status}｜**#{channel_name}**（{guild.name}）\n\n"
-        f"👤 用户：{author} (`{author.id}`)\n\n"
-        f"📝 内容：\n{preview}"
+        f"👤 用户：{author} (`{author.id}`)"
+        f"{_review_content_block(content)}"
     )
     notified = 0
     for admin in await _admin_members(guild):
@@ -793,8 +872,34 @@ async def _edit_review_message(
     view: discord.ui.View | None = None,
     keep_view: bool = False,
 ) -> None:
-    """Edit the review DM after the interaction has been deferred."""
-    kwargs: dict = {"content": content}
+    """Mark the decision while retaining the review's source and evidence."""
+    original = ((interaction.message.content if interaction.message else "") or "").strip()
+    lines = original.splitlines()
+
+    # Retry edits replace the previous status block instead of stacking it.
+    if lines and lines[0].startswith("📌 处理状态："):
+        lines.pop(0)
+        if lines and lines[0].startswith("👮 处理管理员："):
+            lines.pop(0)
+        if lines and not lines[0].strip():
+            lines.pop(0)
+
+    # The initial AI-review line mixes pending state and source. Preserve only
+    # the source once a concrete administrator decision is available.
+    if lines and lines[0].startswith("⚠️ ") and "｜" in lines[0]:
+        _, _, source = lines[0].partition("｜")
+        lines[0] = f"📍 原始频道：{source}"
+
+    moderator = interaction.user
+    moderator_id = getattr(moderator, "id", "unknown")
+    evidence = "\n".join(lines).strip()
+    updated = (
+        f"📌 处理状态：{content}\n"
+        f"👮 处理管理员：{moderator} (`{moderator_id}`)"
+    )
+    if evidence:
+        updated += f"\n\n{evidence}"
+    kwargs: dict = {"content": updated[:2000]}
     if keep_view:
         # Leave existing components untouched.
         pass
@@ -849,6 +954,27 @@ def _interaction_review_text(
         if separator:
             return review_text.strip()
     return ""
+
+
+async def _interaction_review_images(
+    interaction: discord.Interaction,
+) -> list[tuple[str, bytes]]:
+    message = interaction.message
+    if not message or not getattr(message, "attachments", None):
+        return []
+    return await _snapshot_images(message)
+
+
+def _review_channel_name(guild: discord.Guild, channel_id: int) -> str:
+    for accessor_name in ("get_channel_or_thread", "get_channel"):
+        accessor = getattr(guild, accessor_name, None)
+        if not callable(accessor):
+            continue
+        channel = accessor(channel_id)
+        name = getattr(channel, "name", None) if channel is not None else None
+        if name:
+            return str(name)
+    return f"unknown-{channel_id}"
 
 
 async def _delete_reviewed_message(
@@ -933,6 +1059,8 @@ class HITLBanButton(
         if not claim_state:
             return
         await interaction.response.defer()
+        evidence_images = await _interaction_review_images(interaction)
+        channel_name = _review_channel_name(guild, self.channel_id)
         if claim_state == "new":
             try:
                 _record_training_example(text, "BAN")
@@ -959,6 +1087,10 @@ class HITLBanButton(
                 guild=guild,
                 user=user,
                 reason="Confirmed by admin",
+                channel_name=channel_name,
+                evidence_message_id=self.message_id,
+                evidence_text=text,
+                evidence_images=evidence_images,
             )
         except Exception as e:
             logging.error(f"Error banning user: {e}")
@@ -1044,6 +1176,8 @@ class HITLDeleteButton(
         if not claim_state:
             return
         await interaction.response.defer()
+        evidence_images = await _interaction_review_images(interaction)
+        channel_name = _review_channel_name(guild, self.channel_id)
 
         try:
             delete_state = await _delete_reviewed_message(
@@ -1081,8 +1215,16 @@ class HITLDeleteButton(
                 user = await interaction.client.fetch_user(self.user_id)
                 await _dm_user(
                     user,
-                    "Your message was deleted after review by a server administrator. "
-                    "You were not banned.",
+                    _user_notice_with_evidence(
+                        "Your message was deleted after review by a server "
+                        "administrator. You were not banned.",
+                        guild_name=getattr(guild, "name", "Unknown server"),
+                        channel_name=channel_name,
+                        message_id=self.message_id,
+                        content=text,
+                        images=evidence_images,
+                    ),
+                    images=evidence_images,
                 )
             except Exception as e:
                 logging.warning(f"Could not notify user after admin deletion: {e}")
@@ -1257,12 +1399,22 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
 
     if is_admin:
         text = _message_text(message)
+        images = await _snapshot_images(message)
+        channel_name = getattr(
+            getattr(message, "channel", None),
+            "name",
+            "unknown",
+        )
         try:
             await message.delete()
             await _execute_ban(
                 guild=interaction.guild,
                 user=message.author,
                 reason="Reported by admin",
+                channel_name=channel_name,
+                evidence_message_id=getattr(message, "id", None),
+                evidence_text=text,
+                evidence_images=images,
             )
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
@@ -1283,11 +1435,10 @@ async def _handle_report(interaction: discord.Interaction, message: discord.Mess
             text,
             "User report",
         )
-        preview = text if len(text) <= 1500 else text[:1500] + "..."
         body = (
             f"🚨 用户举报：{interaction.user} 在 **#{message.channel.name}**\n\n"
-            f"👤 被举报用户：{message.author} (`{message.author.id}`)\n\n"
-            f"📝 内容：\n{preview}"
+            f"👤 被举报用户：{message.author} (`{message.author.id}`)"
+            f"{_review_content_block(text)}"
         )
         notified = 0
         for admin in await _admin_members(interaction.guild):
@@ -1375,6 +1526,8 @@ class ReportConfirmButton(
         if not claim_state:
             return
         await interaction.response.defer()
+        evidence_images = await _interaction_review_images(interaction)
+        channel_name = _review_channel_name(guild, self.channel_id)
         if claim_state == "new":
             try:
                 _record_training_example(text, "BAN")
@@ -1400,6 +1553,10 @@ class ReportConfirmButton(
                 guild=guild,
                 user=user,
                 reason="Confirmed by admin",
+                channel_name=channel_name,
+                evidence_message_id=self.message_id,
+                evidence_text=text,
+                evidence_images=evidence_images,
             )
         except Exception as e:
             logging.error(f"Error banning reported user: {e}")
