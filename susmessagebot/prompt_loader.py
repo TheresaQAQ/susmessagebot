@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
-DEFAULT_PROMPT_ID = "v3_zh_general"
+DEFAULT_PROMPT_ID = "v4_zh_multilingual"
 
 
 def list_prompt_ids() -> list[str]:
