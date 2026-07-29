@@ -32,12 +32,16 @@ from .stats import (
     store_review_evidence,
     get_review_evidence,
     get_review_reason,
+    store_review_notification,
+    claim_related_review_notifications,
+    mark_review_notification_resolved,
     record_auto_ban,
     clear_auto_ban,
     take_reversible_auto_ban,
 )
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+_BAN_DELETE_MESSAGE_SECONDS = 24 * 60 * 60
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -57,14 +61,11 @@ _REQUIRED_GUILD_PERMISSIONS = (
 )
 _REQUIRED_CHANNEL_PERMISSIONS = (
     ("view_channel", "View Channel"),
-    ("send_messages", "Send Messages"),
-    ("send_messages_in_threads", "Send Messages in Threads"),
     ("read_message_history", "Read Message History"),
     ("manage_messages", "Manage Messages"),
 )
 _REQUIRED_FORUM_PERMISSIONS = (
     ("view_channel", "View Channel"),
-    ("send_messages_in_threads", "Send Messages in Threads"),
     ("read_message_history", "Read Message History"),
     ("manage_messages", "Manage Messages"),
 )
@@ -273,50 +274,7 @@ async def on_guild_join(guild: discord.Guild):
     add_group(guild.id, guild.member_count)
     _refresh_guild_metrics()
     logging.info(f"Joined new server: {guild.name} ({guild.id}) with {guild.member_count} members")
-
-    permission_ok = await _audit_guild_permissions(guild)
-    candidates = [guild.system_channel, *guild.text_channels]
-    channel = next(
-        (
-            candidate
-            for candidate in candidates
-            if candidate is not None
-            and candidate.permissions_for(guild.me).view_channel
-            and candidate.permissions_for(guild.me).send_messages
-        ),
-        None,
-    )
-    if channel:
-        status = (
-            "✅ Permission check passed."
-            if permission_ok
-            else "⚠️ Permission check found missing access; check the bot logs for details."
-        )
-        try:
-            await channel.send(
-                "👋 Thanks for adding SusMessageBot! I am an AI Anti-Scam Moderation Bot!\n\n"
-                f"{status}\n\n"
-                "Required permissions:\n"
-                "✅ Ban Members\n"
-                "✅ Manage Messages\n"
-                "✅ View Channels\n"
-                "✅ Send Messages\n"
-                "✅ Send Messages in Threads\n"
-                "✅ Read Message History"
-            )
-        except Exception as e:
-            logging.warning(
-                "Could not send setup message in guild %s (%s): %s",
-                guild.name,
-                guild.id,
-                e,
-            )
-    else:
-        logging.warning(
-            "No writable text channel available for setup message in guild %s (%s)",
-            guild.name,
-            guild.id,
-        )
+    await _audit_guild_permissions(guild)
 
 
 @client.event
@@ -534,7 +492,11 @@ async def _execute_ban(
         notice,
         images=evidence_images,
     )
-    await guild.ban(discord.Object(id=user.id), reason=reason)
+    await guild.ban(
+        discord.Object(id=user.id),
+        reason=reason,
+        delete_message_seconds=_BAN_DELETE_MESSAGE_SECONDS,
+    )
     strikes.clear(guild.id, user.id)
     if not preserve_auto_ban_record:
         # Admin/manual bans must not be reversible by an unrelated false alarm.
@@ -643,8 +605,32 @@ async def _dm_admins_review(
                 message_id=message_id,
                 channel_id=channel_id,
             )
-            await admin.send(body, view=view, files=_discord_files(images))
+            sent = await admin.send(body, view=view, files=_discord_files(images))
             notified += 1
+            sent_id = getattr(sent, "id", None)
+            sent_channel_id = getattr(getattr(sent, "channel", None), "id", None)
+            if isinstance(sent_id, int) and isinstance(sent_channel_id, int):
+                try:
+                    store_review_notification(
+                        guild.id,
+                        message_id,
+                        author.id,
+                        admin.id,
+                        sent_channel_id,
+                        sent_id,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        "Could not persist admin review DM %s for admin %s: %s",
+                        sent_id,
+                        admin.id,
+                        e,
+                    )
+            else:
+                logging.warning(
+                    "Could not persist admin review DM reference for admin %s",
+                    admin.id,
+                )
         except Exception as e:
             logging.warning(f"Could not DM admin {admin.id}: {e}")
     return notified
@@ -811,6 +797,85 @@ async def _edit_review_message(
     else:
         kwargs["view"] = view
     await interaction.edit_original_response(**kwargs)
+
+
+def _related_ban_review_content(
+    original: str,
+    moderator: discord.abc.User,
+) -> str:
+    """Render a pending review card closed by a ban on a related card."""
+    lines = (original or "").strip().splitlines()
+    if lines and lines[0].startswith("📌 处理状态："):
+        lines.pop(0)
+        if lines and lines[0].startswith("👮 处理管理员："):
+            lines.pop(0)
+        if lines and not lines[0].strip():
+            lines.pop(0)
+    if lines and lines[0].startswith("⚠️ ") and "｜" in lines[0]:
+        _, _, source = lines[0].partition("｜")
+        lines[0] = f"📍 原始频道：{source}"
+
+    moderator_id = getattr(moderator, "id", "unknown")
+    updated = (
+        "📌 处理状态：🚫 关联审核已关闭：该用户已被封禁，Discord 已清理其"
+        "最近 24 小时内的服务器消息。\n"
+        f"👮 处理管理员：{moderator} (`{moderator_id}`)"
+    )
+    evidence = "\n".join(lines).strip()
+    if evidence:
+        updated += f"\n\n{evidence}"
+    return updated[:2000]
+
+
+async def _close_related_ban_reviews(
+    client: discord.Client,
+    *,
+    guild_id: int,
+    user_id: int,
+    current_message_id: int,
+    moderator: discord.abc.User,
+    already_edited_dm_message_id: int | None = None,
+) -> tuple[int, int]:
+    """Best-effort close every pending DM card covered by the 24-hour ban."""
+    rows = claim_related_review_notifications(
+        guild_id,
+        user_id,
+        current_message_id,
+        moderator.id,
+        max_age_seconds=_BAN_DELETE_MESSAGE_SECONDS,
+    )
+    updated = 0
+    failed = 0
+    for dm_channel_id, dm_message_id, _ in rows:
+        if dm_message_id == already_edited_dm_message_id:
+            mark_review_notification_resolved(dm_message_id)
+            updated += 1
+            continue
+        try:
+            channel = client.get_channel(dm_channel_id)
+            if channel is None:
+                channel = await client.fetch_channel(dm_channel_id)
+            review_message = await channel.fetch_message(dm_message_id)
+            await review_message.edit(
+                content=_related_ban_review_content(
+                    review_message.content,
+                    moderator,
+                ),
+                view=None,
+            )
+            mark_review_notification_resolved(dm_message_id)
+            updated += 1
+        except discord.NotFound:
+            mark_review_notification_resolved(dm_message_id)
+        except Exception as e:
+            failed += 1
+            logging.warning(
+                "Could not close related review DM %s in channel %s: %s",
+                dm_message_id,
+                dm_channel_id,
+                e,
+            )
+    return updated, failed
 
 
 async def _require_interaction_admin(
@@ -1006,15 +1071,48 @@ class HITLBanButton(
             )
             return
         if delete_state == "deleted":
-            result = "🚫 已删除消息并封禁该用户。"
+            result = (
+                "🚫 已删除该消息并封禁用户；Discord 同时清理了该用户最近 "
+                "24 小时内的服务器消息。"
+            )
         elif delete_state == "missing":
-            result = "🚫 原消息已不存在，已封禁该用户。"
+            result = (
+                "🚫 原消息已不存在，已封禁用户；Discord 已清理该用户最近 "
+                "24 小时内的服务器消息。"
+            )
         else:
-            result = "⚠️ 已封禁该用户，但消息删除失败，请管理员手动删除。"
+            result = (
+                "🚫 已封禁用户；单条消息删除失败，但 Discord 已通过封禁清理"
+                "该用户最近 24 小时内的服务器消息。"
+            )
+        current_edit_succeeded = False
         try:
             await _edit_review_message(interaction, result)
+            current_edit_succeeded = True
         except Exception as e:
             logging.error(f"Ban succeeded but review message edit failed: {e}")
+        current_dm_message_id = getattr(interaction.message, "id", None)
+        if not isinstance(current_dm_message_id, int) or not current_edit_succeeded:
+            current_dm_message_id = None
+        try:
+            updated, failed = await _close_related_ban_reviews(
+                interaction.client,
+                guild_id=self.guild_id,
+                user_id=self.user_id,
+                current_message_id=self.message_id,
+                moderator=interaction.user,
+                already_edited_dm_message_id=current_dm_message_id,
+            )
+            logging.info(
+                "Closed related ban reviews for guild %s user %s: "
+                "%s updated, %s failed",
+                self.guild_id,
+                self.user_id,
+                updated,
+                failed,
+            )
+        except Exception as e:
+            logging.error(f"Could not close related ban reviews: {e}")
 
 
 class HITLDeleteButton(

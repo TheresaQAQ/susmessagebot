@@ -881,17 +881,17 @@ class DiscordPermissionAuditRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(issues, ["#support (12): View Channel"])
 
-    def test_permission_check_requires_thread_messages(self):
+    def test_permission_check_does_not_require_channel_send_permissions(self):
         guild, _, _ = self._guild(
-            channel_permissions=self._permissions(send_messages_in_threads=False)
+            channel_permissions=self._permissions(
+                send_messages=False,
+                send_messages_in_threads=False,
+            )
         )
 
         issues = bot_discord._guild_permission_issues(guild)
 
-        self.assertEqual(
-            issues,
-            ["#question (9): Send Messages in Threads"],
-        )
+        self.assertEqual(issues, [])
 
     async def test_permission_audit_logs_without_notifying_owner(self):
         guild, _, owner = self._guild(
@@ -930,32 +930,19 @@ class DiscordPermissionAuditRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         audit.assert_awaited_once_with(guild)
 
-    async def test_guild_join_skips_unwritable_system_channel(self):
-        guild, writable, _ = self._guild()
-        blocked = SimpleNamespace(
-            id=8,
-            name="system",
-            permissions_for=MagicMock(
-                return_value=self._permissions(send_messages=False)
-            ),
-            send=AsyncMock(),
-        )
-        guild.system_channel = blocked
-        guild.text_channels = [blocked, writable]
+    async def test_guild_join_never_sends_to_server_channels(self):
+        guild, channel, _ = self._guild()
+        audit = AsyncMock(return_value=True)
 
         with (
             patch.object(bot_discord, "add_group"),
             patch.object(bot_discord, "_refresh_guild_metrics"),
-            patch.object(
-                bot_discord,
-                "_audit_guild_permissions",
-                AsyncMock(return_value=True),
-            ),
+            patch.object(bot_discord, "_audit_guild_permissions", audit),
         ):
             await bot_discord.on_guild_join(guild)
 
-        blocked.send.assert_not_awaited()
-        writable.send.assert_awaited_once()
+        audit.assert_awaited_once_with(guild)
+        channel.send.assert_not_awaited()
 
 
 class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -1211,6 +1198,177 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
             7,
             "[image]",
             "Suspicious image",
+        )
+
+    async def test_review_dm_reference_is_persisted_after_send(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                sent = SimpleNamespace(
+                    id=1001,
+                    channel=SimpleNamespace(id=2001),
+                )
+                admin = SimpleNamespace(id=10, send=AsyncMock(return_value=sent))
+                author = SimpleNamespace(id=7)
+                guild = SimpleNamespace(id=1, name="Test Guild")
+
+                with patch.object(
+                    bot_discord,
+                    "_admin_members",
+                    AsyncMock(return_value=[admin]),
+                ):
+                    notified = await bot_discord._dm_admins_review(
+                        guild,
+                        channel_name="ads",
+                        author=author,
+                        content="scam text",
+                        reason="Suspicious message",
+                        message_id=42,
+                        channel_id=9,
+                    )
+
+                stats.claim_review_decision(1, 42, 7, "ban", 10)
+                rows = stats.claim_related_review_notifications(
+                    1,
+                    7,
+                    42,
+                    10,
+                    max_age_seconds=86400,
+                )
+                self.assertEqual(notified, 1)
+                self.assertEqual(rows, [(2001, 1001, 42)])
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_successful_ban_closes_all_recent_related_review_dms(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                for source_message_id, dm_channel_id, dm_message_id, admin_id in (
+                    (42, 2001, 1001, 10),
+                    (42, 2002, 1002, 11),
+                    (43, 2001, 1003, 10),
+                    (43, 2002, 1004, 11),
+                ):
+                    stats.store_review_notification(
+                        1,
+                        source_message_id,
+                        7,
+                        admin_id,
+                        dm_channel_id,
+                        dm_message_id,
+                    )
+                stats.claim_review_decision(1, 42, 7, "ban", 10)
+
+                original = (
+                    "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
+                    "｜**#ads**（Test Guild）\n\n"
+                    "👤 用户：tester (`7`)\n\n"
+                    "📝 内容：\nscam text"
+                )
+                messages = {
+                    message_id: SimpleNamespace(content=original, edit=AsyncMock())
+                    for message_id in (1002, 1003, 1004)
+                }
+                channels = {
+                    2001: SimpleNamespace(
+                        fetch_message=AsyncMock(
+                            side_effect=lambda message_id: messages[message_id]
+                        )
+                    ),
+                    2002: SimpleNamespace(
+                        fetch_message=AsyncMock(
+                            side_effect=lambda message_id: messages[message_id]
+                        )
+                    ),
+                }
+                client = SimpleNamespace(
+                    get_channel=MagicMock(side_effect=lambda channel_id: channels[channel_id]),
+                    fetch_channel=AsyncMock(),
+                )
+                moderator = SimpleNamespace(id=10)
+
+                updated, failed = await bot_discord._close_related_ban_reviews(
+                    client,
+                    guild_id=1,
+                    user_id=7,
+                    current_message_id=42,
+                    moderator=moderator,
+                    already_edited_dm_message_id=1001,
+                )
+
+                self.assertEqual((updated, failed), (4, 0))
+                self.assertEqual(stats.get_review_decision(1, 43, 7), "covered_by_ban")
+                for message in messages.values():
+                    message.edit.assert_awaited_once()
+                    kwargs = message.edit.await_args.kwargs
+                    self.assertIsNone(kwargs["view"])
+                    self.assertIn("关联审核已关闭", kwargs["content"])
+                    self.assertIn("最近 24 小时", kwargs["content"])
+
+                second = await bot_discord._close_related_ban_reviews(
+                    client,
+                    guild_id=1,
+                    user_id=7,
+                    current_message_id=42,
+                    moderator=moderator,
+                )
+                self.assertEqual(second, (0, 0))
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_related_ban_leaves_reviews_older_than_cleanup_window_open(self):
+        old_db_path = stats.DB_PATH
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db") as db:
+                stats.DB_PATH = db.name
+                stats.init_db()
+                stats.store_review_notification(1, 42, 7, 10, 2001, 1001)
+                stats.store_review_notification(1, 43, 7, 10, 2001, 1002)
+                conn = stats.sqlite3.connect(db.name)
+                conn.execute(
+                    "UPDATE review_notifications SET created_at = ? "
+                    "WHERE dm_message_id = ?",
+                    (time.time() - 86401, 1002),
+                )
+                conn.commit()
+                conn.close()
+                stats.claim_review_decision(1, 42, 7, "ban", 10)
+
+                rows = stats.claim_related_review_notifications(
+                    1,
+                    7,
+                    42,
+                    10,
+                    max_age_seconds=86400,
+                )
+
+                self.assertEqual(rows, [(2001, 1001, 42)])
+                self.assertIsNone(stats.get_review_decision(1, 43, 7))
+        finally:
+            stats.DB_PATH = old_db_path
+
+    async def test_execute_ban_explicitly_cleans_last_24_hours(self):
+        user = SimpleNamespace(id=7, send=AsyncMock())
+        guild = SimpleNamespace(id=1, name="Test Guild", ban=AsyncMock())
+
+        with (
+            patch.object(bot_discord, "strikes", MagicMock()),
+            patch.object(bot_discord, "clear_auto_ban"),
+        ):
+            await bot_discord._execute_ban(
+                guild=guild,
+                user=user,
+                reason="Confirmed by admin",
+            )
+
+        self.assertEqual(
+            guild.ban.await_args.kwargs["delete_message_seconds"],
+            86400,
         )
 
     async def test_review_edit_retains_source_and_replaces_prior_status(self):
@@ -1685,7 +1843,8 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
 
                 execute_ban.assert_awaited_once()
                 body = interaction.edit_original_response.await_args.kwargs["content"]
-                self.assertIn("已封禁该用户，但消息删除失败", body)
+                self.assertIn("单条消息删除失败", body)
+                self.assertIn("最近 24 小时内的服务器消息", body)
         finally:
             stats.DB_PATH = old_db_path
 

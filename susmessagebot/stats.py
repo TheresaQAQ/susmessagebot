@@ -22,6 +22,7 @@ def init_db():
     init_groups_table()
     init_review_decisions_table()
     init_review_evidence_table()
+    init_review_notifications_table()
     init_auto_ban_table()
     init_strikes_table()
 
@@ -234,6 +235,150 @@ def get_review_reason(
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def init_review_notifications_table():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS review_notifications (
+            dm_message_id INTEGER PRIMARY KEY,
+            dm_channel_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            admin_id INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            resolved_at REAL
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_review_notifications_pending_user
+        ON review_notifications (guild_id, user_id, resolved_at, created_at)
+    ''')
+    conn.commit()
+    conn.close()
+
+
+def store_review_notification(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    admin_id: int,
+    dm_channel_id: int,
+    dm_message_id: int,
+) -> None:
+    """Persist one admin DM so related pending cards can be closed later."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO review_notifications (
+            dm_message_id, dm_channel_id, guild_id, message_id,
+            user_id, admin_id, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(dm_message_id) DO UPDATE SET
+            dm_channel_id = excluded.dm_channel_id,
+            guild_id = excluded.guild_id,
+            message_id = excluded.message_id,
+            user_id = excluded.user_id,
+            admin_id = excluded.admin_id,
+            created_at = excluded.created_at,
+            resolved_at = NULL
+        """,
+        (
+            dm_message_id,
+            dm_channel_id,
+            guild_id,
+            message_id,
+            user_id,
+            admin_id,
+            time.time(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def claim_related_review_notifications(
+    guild_id: int,
+    user_id: int,
+    current_message_id: int,
+    decided_by: int,
+    *,
+    max_age_seconds: int,
+) -> list[tuple[int, int, int]]:
+    """Claim pending reviews covered by a successful user ban.
+
+    Returns ``(dm_channel_id, dm_message_id, source_message_id)`` rows for
+    unresolved notification cards that should be edited.
+    """
+    cutoff = time.time() - max_age_seconds
+    now = time.time()
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.execute(
+                """
+                SELECT dm_channel_id, dm_message_id, message_id
+                FROM review_notifications
+                WHERE guild_id = ? AND user_id = ?
+                  AND resolved_at IS NULL AND created_at >= ?
+                ORDER BY created_at, dm_message_id
+                """,
+                (guild_id, user_id, cutoff),
+            )
+            rows = [tuple(map(int, row)) for row in cursor.fetchall()]
+            allowed_message_ids: set[int] = set()
+            for message_id in {row[2] for row in rows}:
+                key = review_key(guild_id, message_id, user_id)
+                cursor.execute(
+                    "SELECT decision FROM review_decisions WHERE review_key = ?",
+                    (key,),
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    if existing[0] in {"ban", "covered_by_ban"}:
+                        allowed_message_ids.add(message_id)
+                    continue
+                cursor.execute(
+                    """
+                    INSERT INTO review_decisions (
+                        review_key, decision, decided_by, decided_at
+                    ) VALUES (?, 'covered_by_ban', ?, ?)
+                    """,
+                    (key, decided_by, now),
+                )
+                allowed_message_ids.add(message_id)
+
+            # The clicked card already owns a normal "ban" claim. Including it
+            # ensures every admin's copy of that same review is also updated.
+            if current_message_id in {row[2] for row in rows}:
+                allowed_message_ids.add(current_message_id)
+            conn.execute("COMMIT")
+            return [row for row in rows if row[2] in allowed_message_ids]
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def mark_review_notification_resolved(dm_message_id: int) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE review_notifications
+        SET resolved_at = COALESCE(resolved_at, ?)
+        WHERE dm_message_id = ?
+        """,
+        (time.time(), dm_message_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def init_auto_ban_table():
