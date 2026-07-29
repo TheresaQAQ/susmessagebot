@@ -1213,6 +1213,9 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 admin = SimpleNamespace(id=10, send=AsyncMock(return_value=sent))
                 author = SimpleNamespace(id=7)
                 guild = SimpleNamespace(id=1, name="Test Guild")
+                source_message_id = stats._discord_snowflake_for_unix_time(
+                    time.time() - 60
+                )
 
                 with patch.object(
                     bot_discord,
@@ -1225,20 +1228,29 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                         author=author,
                         content="scam text",
                         reason="Suspicious message",
-                        message_id=42,
+                        message_id=source_message_id,
                         channel_id=9,
                     )
 
-                stats.claim_review_decision(1, 42, 7, "ban", 10)
+                stats.claim_review_decision(
+                    1,
+                    source_message_id,
+                    7,
+                    "ban",
+                    10,
+                )
                 rows = stats.claim_related_review_notifications(
                     1,
                     7,
-                    42,
+                    source_message_id,
                     10,
                     max_age_seconds=86400,
                 )
                 self.assertEqual(notified, 1)
-                self.assertEqual(rows, [(2001, 1001, 42)])
+                self.assertEqual(
+                    rows,
+                    [(2001, 1001, source_message_id)],
+                )
         finally:
             stats.DB_PATH = old_db_path
 
@@ -1248,11 +1260,17 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.NamedTemporaryFile(suffix=".db") as db:
                 stats.DB_PATH = db.name
                 stats.init_db()
+                current_message_id = stats._discord_snowflake_for_unix_time(
+                    time.time() - 60
+                )
+                related_message_id = stats._discord_snowflake_for_unix_time(
+                    time.time() - 30
+                )
                 for source_message_id, dm_channel_id, dm_message_id, admin_id in (
-                    (42, 2001, 1001, 10),
-                    (42, 2002, 1002, 11),
-                    (43, 2001, 1003, 10),
-                    (43, 2002, 1004, 11),
+                    (current_message_id, 2001, 1001, 10),
+                    (current_message_id, 2002, 1002, 11),
+                    (related_message_id, 2001, 1003, 10),
+                    (related_message_id, 2002, 1004, 11),
                 ):
                     stats.store_review_notification(
                         1,
@@ -1262,7 +1280,13 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                         dm_channel_id,
                         dm_message_id,
                     )
-                stats.claim_review_decision(1, 42, 7, "ban", 10)
+                stats.claim_review_decision(
+                    1,
+                    current_message_id,
+                    7,
+                    "ban",
+                    10,
+                )
 
                 original = (
                     "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
@@ -1296,25 +1320,30 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                     client,
                     guild_id=1,
                     user_id=7,
-                    current_message_id=42,
+                    current_message_id=current_message_id,
                     moderator=moderator,
                     already_edited_dm_message_id=1001,
                 )
 
                 self.assertEqual((updated, failed), (4, 0))
-                self.assertEqual(stats.get_review_decision(1, 43, 7), "covered_by_ban")
+                self.assertEqual(
+                    stats.get_review_decision(1, related_message_id, 7),
+                    "covered_by_ban",
+                )
                 for message in messages.values():
                     message.edit.assert_awaited_once()
                     kwargs = message.edit.await_args.kwargs
                     self.assertIsNone(kwargs["view"])
-                    self.assertIn("关联审核已关闭", kwargs["content"])
-                    self.assertIn("最近 24 小时", kwargs["content"])
+                    self.assertIn(
+                        "用户已封禁，该消息已随封禁操作删除",
+                        kwargs["content"],
+                    )
 
                 second = await bot_discord._close_related_ban_reviews(
                     client,
                     guild_id=1,
                     user_id=7,
-                    current_message_id=42,
+                    current_message_id=current_message_id,
                     moderator=moderator,
                 )
                 self.assertEqual(second, (0, 0))
@@ -1327,28 +1356,52 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.NamedTemporaryFile(suffix=".db") as db:
                 stats.DB_PATH = db.name
                 stats.init_db()
-                stats.store_review_notification(1, 42, 7, 10, 2001, 1001)
-                stats.store_review_notification(1, 43, 7, 10, 2001, 1002)
-                conn = stats.sqlite3.connect(db.name)
-                conn.execute(
-                    "UPDATE review_notifications SET created_at = ? "
-                    "WHERE dm_message_id = ?",
-                    (time.time() - 86401, 1002),
+                recent_message_id = stats._discord_snowflake_for_unix_time(
+                    time.time() - 60
                 )
-                conn.commit()
-                conn.close()
-                stats.claim_review_decision(1, 42, 7, "ban", 10)
+                old_message_id = stats._discord_snowflake_for_unix_time(
+                    time.time() - 86401
+                )
+                stats.store_review_notification(
+                    1,
+                    recent_message_id,
+                    7,
+                    10,
+                    2001,
+                    1001,
+                )
+                # The notification is new, but its original Discord message is old.
+                stats.store_review_notification(
+                    1,
+                    old_message_id,
+                    7,
+                    10,
+                    2001,
+                    1002,
+                )
+                stats.claim_review_decision(
+                    1,
+                    recent_message_id,
+                    7,
+                    "ban",
+                    10,
+                )
 
                 rows = stats.claim_related_review_notifications(
                     1,
                     7,
-                    42,
+                    recent_message_id,
                     10,
                     max_age_seconds=86400,
                 )
 
-                self.assertEqual(rows, [(2001, 1001, 42)])
-                self.assertIsNone(stats.get_review_decision(1, 43, 7))
+                self.assertEqual(
+                    rows,
+                    [(2001, 1001, recent_message_id)],
+                )
+                self.assertIsNone(
+                    stats.get_review_decision(1, old_message_id, 7)
+                )
         finally:
             stats.DB_PATH = old_db_path
 

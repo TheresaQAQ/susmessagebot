@@ -5,6 +5,13 @@ import time
 from .config import STATS_DB_PATH
 
 DB_PATH = STATS_DB_PATH
+_DISCORD_EPOCH_MS = 1420070400000
+
+
+def _discord_snowflake_for_unix_time(timestamp: float) -> int:
+    """Return the lowest Discord snowflake generated at a Unix timestamp."""
+    discord_ms = max(0, int(timestamp * 1000) - _DISCORD_EPOCH_MS)
+    return discord_ms << 22
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -313,7 +320,9 @@ def claim_related_review_notifications(
     Returns ``(dm_channel_id, dm_message_id, source_message_id)`` rows for
     unresolved notification cards that should be edited.
     """
-    cutoff = time.time() - max_age_seconds
+    minimum_message_id = _discord_snowflake_for_unix_time(
+        time.time() - max_age_seconds
+    )
     now = time.time()
     conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
     try:
@@ -325,10 +334,10 @@ def claim_related_review_notifications(
                 SELECT dm_channel_id, dm_message_id, message_id
                 FROM review_notifications
                 WHERE guild_id = ? AND user_id = ?
-                  AND resolved_at IS NULL AND created_at >= ?
-                ORDER BY created_at, dm_message_id
+                  AND resolved_at IS NULL AND message_id >= ?
+                ORDER BY message_id, dm_message_id
                 """,
-                (guild_id, user_id, cutoff),
+                (guild_id, user_id, minimum_message_id),
             )
             rows = [tuple(map(int, row)) for row in cursor.fetchall()]
             allowed_message_ids: set[int] = set()

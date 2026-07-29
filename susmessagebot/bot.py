@@ -817,8 +817,8 @@ def _related_ban_review_content(
 
     moderator_id = getattr(moderator, "id", "unknown")
     updated = (
-        "📌 处理状态：🚫 关联审核已关闭：该用户已被封禁，Discord 已清理其"
-        "最近 24 小时内的服务器消息。\n"
+        "📌 处理状态：🚫 用户已封禁，该消息已随封禁操作删除"
+        "（最近 24 小时清理范围）。\n"
         f"👮 处理管理员：{moderator} (`{moderator_id}`)"
     )
     evidence = "\n".join(lines).strip()
