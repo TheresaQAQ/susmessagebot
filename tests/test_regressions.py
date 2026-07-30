@@ -589,6 +589,136 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
             reference=None,
         )
 
+    async def test_discord_picker_gif_only_message_skips_moderation(self):
+        gif_url = "https://klipy.com/gifs/a-ty-ne-veril-serezno"
+        message = self._discord_message(content=gif_url)
+        message.embeds = [SimpleNamespace(type="gifv", url=gif_url)]
+        classify_text = MagicMock(return_value="BAN")
+        classify_urls = MagicMock(return_value="BAN")
+        increment = MagicMock()
+
+        with (
+            patch.object(bot_discord, "classify_message", classify_text),
+            patch.object(bot_discord, "analyze_urls", classify_urls),
+            patch.object(bot_discord, "increment_stat", increment),
+            patch.object(bot_discord, "_ban_user", AsyncMock()) as ban_user,
+            patch.object(
+                bot_discord,
+                "_request_manual_review",
+                AsyncMock(),
+            ) as request_review,
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_not_called()
+        classify_urls.assert_not_called()
+        increment.assert_not_called()
+        ban_user.assert_not_awaited()
+        request_review.assert_not_awaited()
+
+    async def test_picker_gif_without_embed_still_skips_moderation(self):
+        gif_url = "https://klipy.com/gifs/embed-not-ready"
+        message = self._discord_message(content=gif_url)
+        message.embeds = []
+
+        with (
+            patch.object(bot_discord, "classify_message") as classify_text,
+            patch.object(bot_discord, "analyze_urls") as classify_urls,
+            patch.object(bot_discord, "_ban_user", AsyncMock()) as ban_user,
+            patch.object(
+                bot_discord,
+                "_request_manual_review",
+                AsyncMock(),
+            ) as request_review,
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_not_called()
+        classify_urls.assert_not_called()
+        ban_user.assert_not_awaited()
+        request_review.assert_not_awaited()
+
+    async def test_discord_picker_gif_with_text_stays_in_moderation(self):
+        gif_url = "https://klipy.com/gifs/reaction"
+        content = f"{gif_url} cheap accounts for sale"
+        message = self._discord_message(
+            content=content
+        )
+        message.embeds = [SimpleNamespace(type="gifv", url=gif_url)]
+        ban_user = AsyncMock()
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_message",
+                return_value="BAN",
+            ) as classify_text,
+            patch.object(
+                bot_discord,
+                "analyze_urls",
+                return_value="SAFE",
+            ) as classify_urls,
+            patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", AsyncMock()),
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_called_once_with(content)
+        classify_urls.assert_called_once_with(content)
+        ban_user.assert_awaited_once_with(
+            message,
+            reason="Suspicious message",
+        )
+
+    async def test_picker_domain_non_gif_path_is_still_moderated(self):
+        url = "https://klipy.com/support"
+        message = self._discord_message(content=url)
+        message.embeds = []
+        ban_user = AsyncMock()
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_message",
+                return_value="SAFE",
+            ) as classify_text,
+            patch.object(
+                bot_discord,
+                "analyze_urls",
+                return_value="BAN",
+            ) as classify_urls,
+            patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", AsyncMock()),
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_called_once_with(url)
+        classify_urls.assert_called_once_with(url)
+        ban_user.assert_awaited_once_with(
+            message,
+            reason="Suspicious message",
+        )
+
+    def test_picker_gif_url_accepts_only_known_share_paths(self):
+        accepted = (
+            "https://klipy.com/gifs/reaction",
+            "https://tenor.com/view/reaction-gif-123",
+            "https://giphy.com/gifs/reaction-abc123",
+        )
+        rejected = (
+            "https://klipy.com/support",
+            "https://klipy.com.evil.example/gifs/ad",
+            "https://example.com/gifs/reaction",
+            "https://klipy.com/gifs/reaction extra text",
+        )
+
+        for url in accepted:
+            with self.subTest(url=url):
+                self.assertTrue(bot_discord._is_discord_picker_gif_url(url))
+        for url in rejected:
+            with self.subTest(url=url):
+                self.assertFalse(bot_discord._is_discord_picker_gif_url(url))
+
     async def test_discord_text_error_is_sent_for_review_without_delete(self):
         message = self._discord_message()
         ban_user = AsyncMock()

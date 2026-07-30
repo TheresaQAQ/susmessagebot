@@ -17,6 +17,7 @@ import asyncio
 import io
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
 from prometheus_client import Gauge, start_http_server
 from .stats import (
     init_db,
@@ -41,6 +42,11 @@ from .stats import (
 )
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+_DISCORD_GIF_PROVIDER_PATHS = {
+    "giphy.com": ("/gifs/",),
+    "klipy.com": ("/gifs/",),
+    "tenor.com": ("/view/",),
+}
 _BAN_DELETE_MESSAGE_SECONDS = 24 * 60 * 60
 
 logging.basicConfig(
@@ -308,6 +314,9 @@ async def on_message(message: discord.Message):
     if message.author.guild_permissions.administrator:
         return
 
+    if _is_discord_picker_gif_only_message(message):
+        return
+
     # Aggregate modalities with BAN > REVIEW > SAFE. Image REVIEW must not
     # short-circuit text/URL checks, or scam text attached to a broken image
     # would only enter soft review.
@@ -390,6 +399,39 @@ async def on_message(message: discord.Message):
     else:
         increment_stat('messages_safe')
         MESSAGES_CLASSIFIED_SAFE.set(get_stat('messages_safe'))
+
+
+def _is_discord_picker_gif_url(url: str) -> bool:
+    if not url or any(char.isspace() for char in url):
+        return False
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    if host.startswith("www."):
+        host = host[4:]
+    for domain, path_prefixes in _DISCORD_GIF_PROVIDER_PATHS.items():
+        if host != domain and not host.endswith(f".{domain}"):
+            continue
+        return any(parsed.path.startswith(prefix) for prefix in path_prefixes)
+    return False
+
+
+def _is_discord_picker_gif_only_message(message: discord.Message) -> bool:
+    """Return True when the entire message is a known picker GIF share URL."""
+    if getattr(message, "attachments", None):
+        return False
+
+    text = (message.content or "").strip()
+    if not text:
+        return False
+
+    if text.startswith("<") and text.endswith(">"):
+        text = text[1:-1].strip()
+    return _is_discord_picker_gif_url(text)
 
 
 async def _admin_members(guild: discord.Guild) -> list[discord.Member]:
