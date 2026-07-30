@@ -67,6 +67,7 @@ examples = [
     ('Купить за сотку баксов за 648 драконки когда', "SAFE"),
     ('bro', "BAN"),
     ('🔥 游戏金币低价出售！100万金币仅需 $9.99，账号、装备、代练均可购买，支持快速到账。限时优惠，立即私聊 @cheap_gold_shop 下单！', "BAN"),
+    ('https://klipy.com/gifs/a-ty-ne-veril-serezno', "SAFE"),
 ]
 
 
