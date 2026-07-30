@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 from .moderator import classify_message
 from .image_moderator import classify_image
-from .url_moderator import analyze_urls, load_blocklist
+from .url_moderator import URL_PATTERN, analyze_urls, load_blocklist
 from .config import (
     DISCORD_BOT_TOKEN,
     APPEAL_DISCORD_USER_ID,
@@ -15,6 +15,7 @@ from .strike_tracker import strikes, ban_notice_text
 import logging
 import asyncio
 import io
+import re
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -47,6 +48,7 @@ _DISCORD_GIF_PROVIDER_PATHS = {
     "klipy.com": ("/gifs/",),
     "tenor.com": ("/view/",),
 }
+_DISCORD_CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:[^:\s>]+:\d+>")
 _BAN_DELETE_MESSAGE_SECONDS = 24 * 60 * 60
 
 logging.basicConfig(
@@ -314,9 +316,6 @@ async def on_message(message: discord.Message):
     if message.author.guild_permissions.administrator:
         return
 
-    if _is_discord_picker_gif_only_message(message):
-        return
-
     # Aggregate modalities with BAN > REVIEW > SAFE. Image REVIEW must not
     # short-circuit text/URL checks, or scam text attached to a broken image
     # would only enter soft review.
@@ -353,7 +352,7 @@ async def on_message(message: discord.Message):
                 final = "REVIEW"
                 review_reason = "Image moderation unavailable"
 
-    text = (message.content or "").strip()
+    text = _moderation_text(message)
     if text:
         text_result = await loop.run_in_executor(None, classify_message, text)
         url_result = await loop.run_in_executor(None, analyze_urls, text)
@@ -420,18 +419,28 @@ def _is_discord_picker_gif_url(url: str) -> bool:
     return False
 
 
-def _is_discord_picker_gif_only_message(message: discord.Message) -> bool:
-    """Return True when the entire message is a known picker GIF share URL."""
-    if getattr(message, "attachments", None):
-        return False
-
-    text = (message.content or "").strip()
+def _strip_discord_media_text(text: str) -> str:
+    """Remove trusted GIF links and Discord custom emoji from text."""
+    text = (text or "").strip()
     if not text:
-        return False
+        return ""
 
-    if text.startswith("<") and text.endswith(">"):
-        text = text[1:-1].strip()
-    return _is_discord_picker_gif_url(text)
+    text = _DISCORD_CUSTOM_EMOJI_PATTERN.sub(" ", text)
+    text = URL_PATTERN.sub(
+        lambda match: (
+            " "
+            if _is_discord_picker_gif_url(match.group(0))
+            else match.group(0)
+        ),
+        text,
+    )
+    text = re.sub(r"<\s*>", " ", text)
+    return " ".join(text.split())
+
+
+def _moderation_text(message: discord.Message) -> str:
+    """Return the user-authored text that should enter moderation."""
+    return _strip_discord_media_text(message.content or "")
 
 
 async def _admin_members(guild: discord.Guild) -> list[discord.Member]:
@@ -564,7 +573,7 @@ def _trainable_text(text: str) -> str | None:
 
 def _record_training_example(text: str, label: str) -> None:
     """Persist a local training example and best-effort sync it to GitHub."""
-    trainable = _trainable_text(text)
+    trainable = _trainable_text(_strip_discord_media_text(text))
     if not trainable:
         logging.info("Skipping text training for non-textual evidence (%r)", text)
         return

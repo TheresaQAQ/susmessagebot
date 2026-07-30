@@ -663,11 +663,218 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_discord.on_message(message)
 
-        classify_text.assert_called_once_with(content)
-        classify_urls.assert_called_once_with(content)
+        classify_text.assert_called_once_with("cheap accounts for sale")
+        classify_urls.assert_called_once_with("cheap accounts for sale")
         ban_user.assert_awaited_once_with(
             message,
             reason="Suspicious message",
+        )
+
+    async def test_picker_gif_does_not_hide_other_url(self):
+        gif_url = "https://klipy.com/gifs/reaction"
+        other_url = "https://unknown.example/sale"
+        message = self._discord_message(content=f"{gif_url} {other_url}")
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_message",
+                return_value="SAFE",
+            ) as classify_text,
+            patch.object(
+                bot_discord,
+                "analyze_urls",
+                return_value="REVIEW",
+            ) as classify_urls,
+            patch.object(bot_discord, "_ban_user", AsyncMock()),
+            patch.object(
+                bot_discord,
+                "_request_manual_review",
+                AsyncMock(),
+            ) as request_review,
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_called_once_with(other_url)
+        classify_urls.assert_called_once_with(other_url)
+        request_review.assert_awaited_once_with(
+            message,
+            reason="URL moderation unavailable",
+        )
+
+    async def test_custom_emojis_only_skip_moderation(self):
+        message = self._discord_message(
+            content="<:static:123456789012345678> <a:dance:234567890123456789>"
+        )
+
+        with (
+            patch.object(bot_discord, "classify_message") as classify_text,
+            patch.object(bot_discord, "analyze_urls") as classify_urls,
+            patch.object(bot_discord, "_ban_user", AsyncMock()) as ban_user,
+            patch.object(
+                bot_discord,
+                "_request_manual_review",
+                AsyncMock(),
+            ) as request_review,
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_not_called()
+        classify_urls.assert_not_called()
+        ban_user.assert_not_awaited()
+        request_review.assert_not_awaited()
+
+    async def test_custom_emoji_does_not_hide_other_text(self):
+        message = self._discord_message(
+            content="<a:dance:234567890123456789> cheap accounts for sale"
+        )
+        ban_user = AsyncMock()
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_message",
+                return_value="BAN",
+            ) as classify_text,
+            patch.object(
+                bot_discord,
+                "analyze_urls",
+                return_value="SAFE",
+            ) as classify_urls,
+            patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", AsyncMock()),
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_called_once_with("cheap accounts for sale")
+        classify_urls.assert_called_once_with("cheap accounts for sale")
+        ban_user.assert_awaited_once_with(
+            message,
+            reason="Suspicious message",
+        )
+
+    async def test_native_sticker_only_skips_moderation(self):
+        message = self._discord_message(content="")
+        message.stickers = [SimpleNamespace(id=123, name="wave")]
+
+        with (
+            patch.object(bot_discord, "classify_message") as classify_text,
+            patch.object(bot_discord, "analyze_urls") as classify_urls,
+            patch.object(bot_discord, "_ban_user", AsyncMock()) as ban_user,
+            patch.object(
+                bot_discord,
+                "_request_manual_review",
+                AsyncMock(),
+            ) as request_review,
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_not_called()
+        classify_urls.assert_not_called()
+        ban_user.assert_not_awaited()
+        request_review.assert_not_awaited()
+
+    async def test_native_sticker_does_not_hide_other_text(self):
+        message = self._discord_message(content="cheap accounts for sale")
+        message.stickers = [SimpleNamespace(id=123, name="wave")]
+        ban_user = AsyncMock()
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_message",
+                return_value="BAN",
+            ) as classify_text,
+            patch.object(
+                bot_discord,
+                "analyze_urls",
+                return_value="SAFE",
+            ) as classify_urls,
+            patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", AsyncMock()),
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_called_once_with("cheap accounts for sale")
+        classify_urls.assert_called_once_with("cheap accounts for sale")
+        ban_user.assert_awaited_once_with(
+            message,
+            reason="Suspicious message",
+        )
+
+    def test_combined_discord_media_tokens_clean_to_empty(self):
+        message = self._discord_message(
+            content=(
+                "<a:dance:234567890123456789> "
+                "https://klipy.com/gifs/reaction"
+            )
+        )
+
+        self.assertEqual(bot_discord._moderation_text(message), "")
+
+    def test_training_example_uses_filtered_moderation_text(self):
+        text = (
+            "<a:dance:234567890123456789> cheap accounts for sale "
+            "https://klipy.com/gifs/reaction"
+        )
+
+        with (
+            patch.object(bot_discord, "add_example") as add_example,
+            patch.object(
+                bot_discord,
+                "sync_example_to_github",
+                return_value=True,
+            ) as sync_example,
+        ):
+            bot_discord._record_training_example(text, "BAN")
+
+        add_example.assert_called_once_with("cheap accounts for sale", "BAN")
+        sync_example.assert_called_once_with("cheap accounts for sale", "BAN")
+
+    def test_training_example_skips_discord_media_only_text(self):
+        text = (
+            "<:static:123456789012345678> "
+            "https://klipy.com/gifs/reaction"
+        )
+
+        with (
+            patch.object(bot_discord, "add_example") as add_example,
+            patch.object(bot_discord, "sync_example_to_github") as sync_example,
+        ):
+            bot_discord._record_training_example(text, "SAFE")
+
+        add_example.assert_not_called()
+        sync_example.assert_not_called()
+
+    async def test_uploaded_gif_still_uses_image_moderation(self):
+        attachment = SimpleNamespace(
+            filename="advertisement.gif",
+            content_type="image/gif",
+            read=AsyncMock(return_value=b"gif bytes"),
+        )
+        message = self._discord_message(content="", attachments=[attachment])
+        ban_user = AsyncMock()
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_image",
+                return_value="BAN",
+            ) as classify_image,
+            patch.object(bot_discord, "classify_message") as classify_text,
+            patch.object(bot_discord, "analyze_urls") as classify_urls,
+            patch.object(bot_discord, "_ban_user", ban_user),
+            patch.object(bot_discord, "_request_manual_review", AsyncMock()),
+        ):
+            await bot_discord.on_message(message)
+
+        classify_image.assert_called_once_with(b"gif bytes")
+        classify_text.assert_not_called()
+        classify_urls.assert_not_called()
+        ban_user.assert_awaited_once_with(
+            message,
+            reason="Suspicious image",
+            evidence_images=[("advertisement.gif", b"gif bytes")],
         )
 
     async def test_picker_domain_non_gif_path_is_still_moderated(self):
