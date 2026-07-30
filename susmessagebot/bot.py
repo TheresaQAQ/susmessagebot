@@ -316,6 +316,34 @@ async def on_message(message: discord.Message):
     if message.author.guild_permissions.administrator:
         return
 
+    text = _moderation_text(message)
+    gif_links, custom_emojis = _discord_media_token_counts(message.content or "")
+    stickers_count = len(getattr(message, "stickers", ()) or ())
+    if gif_links or custom_emojis or stickers_count:
+        image_attachments = sum(
+            1 for attachment in message.attachments
+            if _is_image_attachment(attachment)
+        )
+        action = (
+            "moderate_remaining_content"
+            if text or image_attachments
+            else "ignore_media_only"
+        )
+        logging.info(
+            "discord media filter guild=%s channel=%s message=%s user=%s "
+            "gif_links=%s custom_emojis=%s stickers=%s "
+            "image_attachments=%s action=%s",
+            message.guild.id,
+            message.channel.id,
+            message.id,
+            message.author.id,
+            gif_links,
+            custom_emojis,
+            stickers_count,
+            image_attachments,
+            action,
+        )
+
     # Aggregate modalities with BAN > REVIEW > SAFE. Image REVIEW must not
     # short-circuit text/URL checks, or scam text attached to a broken image
     # would only enter soft review.
@@ -352,7 +380,6 @@ async def on_message(message: discord.Message):
                 final = "REVIEW"
                 review_reason = "Image moderation unavailable"
 
-    text = _moderation_text(message)
     if text:
         text_result = await loop.run_in_executor(None, classify_message, text)
         url_result = await loop.run_in_executor(None, analyze_urls, text)
@@ -436,6 +463,17 @@ def _strip_discord_media_text(text: str) -> str:
     )
     text = re.sub(r"<\s*>", " ", text)
     return " ".join(text.split())
+
+
+def _discord_media_token_counts(text: str) -> tuple[int, int]:
+    """Return filtered GIF-link and custom-emoji counts."""
+    gif_links = sum(
+        1
+        for match in URL_PATTERN.finditer(text or "")
+        if _is_discord_picker_gif_url(match.group(0))
+    )
+    custom_emojis = len(_DISCORD_CUSTOM_EMOJI_PATTERN.findall(text or ""))
+    return gif_links, custom_emojis
 
 
 def _moderation_text(message: discord.Message) -> str:

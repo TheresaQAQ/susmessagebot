@@ -601,6 +601,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_discord, "classify_message", classify_text),
             patch.object(bot_discord, "analyze_urls", classify_urls),
             patch.object(bot_discord, "increment_stat", increment),
+            patch.object(bot_discord.logging, "info") as log_info,
             patch.object(bot_discord, "_ban_user", AsyncMock()) as ban_user,
             patch.object(
                 bot_discord,
@@ -615,6 +616,13 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         increment.assert_not_called()
         ban_user.assert_not_awaited()
         request_review.assert_not_awaited()
+        self.assertTrue(
+            any(
+                call.args[-1] == "ignore_media_only"
+                and call.args[5:8] == (1, 0, 0)
+                for call in log_info.call_args_list
+            )
+        )
 
     async def test_picker_gif_without_embed_still_skips_moderation(self):
         gif_url = "https://klipy.com/gifs/embed-not-ready"
@@ -658,6 +666,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "analyze_urls",
                 return_value="SAFE",
             ) as classify_urls,
+            patch.object(bot_discord.logging, "info") as log_info,
             patch.object(bot_discord, "_ban_user", ban_user),
             patch.object(bot_discord, "_request_manual_review", AsyncMock()),
         ):
@@ -665,6 +674,13 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         classify_text.assert_called_once_with("cheap accounts for sale")
         classify_urls.assert_called_once_with("cheap accounts for sale")
+        self.assertTrue(
+            any(
+                call.args[-1] == "moderate_remaining_content"
+                and call.args[5:8] == (1, 0, 0)
+                for call in log_info.call_args_list
+            )
+        )
         ban_user.assert_awaited_once_with(
             message,
             reason="Suspicious message",
@@ -760,6 +776,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(bot_discord, "classify_message") as classify_text,
             patch.object(bot_discord, "analyze_urls") as classify_urls,
+            patch.object(bot_discord.logging, "info") as log_info,
             patch.object(bot_discord, "_ban_user", AsyncMock()) as ban_user,
             patch.object(
                 bot_discord,
@@ -773,6 +790,13 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         classify_urls.assert_not_called()
         ban_user.assert_not_awaited()
         request_review.assert_not_awaited()
+        self.assertTrue(
+            any(
+                call.args[-1] == "ignore_media_only"
+                and call.args[5:8] == (0, 0, 1)
+                for call in log_info.call_args_list
+            )
+        )
 
     async def test_native_sticker_does_not_hide_other_text(self):
         message = self._discord_message(content="cheap accounts for sale")
