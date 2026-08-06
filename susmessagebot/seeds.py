@@ -70,6 +70,7 @@ examples = [
     ('https://klipy.com/gifs/a-ty-ne-veril-serezno', "SAFE"),
     ('Только заменю токен форм черч на экзальт', "SAFE"),
     ('4 сука за 1 бой!', "SAFE"),
+    ('Письками кончайте мериться.', "SAFE"),
 ]
 
 
