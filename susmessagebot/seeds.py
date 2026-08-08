@@ -71,6 +71,7 @@ examples = [
     ('Только заменю токен форм черч на экзальт', "SAFE"),
     ('4 сука за 1 бой!', "SAFE"),
     ('Письками кончайте мериться.', "SAFE"),
+    ("Hope you're all having a great day I'm a character artist with a big love for fantasy, original characters, and bringing unique ideas to life. I enjoy working on all kinds of characters from D&D heroes and to creatures, furry characters, and everything in between my commissions are currently open, and I'd genuinely love to work on some fun new projects. If you've got a character you've been wanting to see illustrated, feel free to send me a message. I'd be happy to hear your ideas and see what we can create together thanks so much for checking out my work it really means a lot. I hope you enjoy it, and I'd love to hear what you think!", "BAN"),
 ]
 
 
