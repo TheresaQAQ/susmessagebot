@@ -25,6 +25,18 @@ SILICONFLOW_VISION_MODEL = os.getenv(
     "Qwen/Qwen3-VL-8B-Instruct",
 )
 
+# Alibaba Cloud Model Studio (DashScope) OpenAI-compatible fallback backend.
+# Text, image, and URL moderation use it when SiliconFlow fails.
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
+DASHSCOPE_BASE_URL = os.getenv(
+    "DASHSCOPE_BASE_URL",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+)
+DASHSCOPE_VISION_MODEL = os.getenv(
+    "DASHSCOPE_VISION_MODEL",
+    "qwen3-vl-flash",
+)
+
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 # Discord user ID shown in ban DMs for unban appeals (add this user to send feedback).
 APPEAL_DISCORD_USER_ID = os.getenv("APPEAL_DISCORD_USER_ID", "")

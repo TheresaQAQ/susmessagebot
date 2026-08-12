@@ -85,6 +85,9 @@ I seek your kind understanding for any teething issues.
 - Add the following to your `.env` file:
   - `SILICONFLOW_API_KEY` — obtain from [cloud.siliconflow.cn](https://cloud.siliconflow.cn)
   - `SILICONFLOW_MODEL` — optional, defaults to `Qwen/Qwen2.5-7B-Instruct`
+  - `DASHSCOPE_API_KEY` — optional Alibaba Cloud Model Studio key used when SiliconFlow fails
+  - `DASHSCOPE_BASE_URL` — optional, defaults to the Beijing OpenAI-compatible endpoint
+  - `DASHSCOPE_VISION_MODEL` — optional, defaults to `qwen3-vl-flash`
   - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python -m susmessagebot.bot`
   - `GITHUB_TOKEN` — GitHub Personal Access Token with `Contents: Read and Write` permission
   - `GITHUB_REPO` — this repository (e.g. `TheresaQAQ/susmessagebot`)
@@ -93,6 +96,8 @@ I seek your kind understanding for any teething issues.
 ## Model Used:
 
 `Qwen/Qwen2.5-7B-Instruct` — free model on SiliconFlow (OpenAI-compatible). `Qwen/Qwen3.5-4B` is also listed but currently often times out; keep `enable_thinking=false` for Qwen3/3.5 thinking models.
+
+Text, image, and URL moderation use SiliconFlow first. If its request fails or returns an unparseable verdict, the bot falls back once to Alibaba Cloud Model Studio `qwen3-vl-flash` through its OpenAI-compatible API. If the fallback is unavailable or also fails, the result is `REVIEW`.
 
 ## CI/CD (Discord on VPS + Docker)
 
@@ -127,6 +132,7 @@ sudo chmod 600 /opt/susmessagebot-secrets/.env
 
 # Edit .env directly on the VPS. At minimum, set:
 # DISCORD_BOT_TOKEN, SILICONFLOW_API_KEY, SILICONFLOW_MODEL,
+# DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, DASHSCOPE_VISION_MODEL,
 # GITHUB_TOKEN, GITHUB_REPO, and GITHUB_BRANCH.
 sudo nano /opt/susmessagebot-secrets/.env
 

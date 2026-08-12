@@ -14,6 +14,13 @@ client = OpenAI(
     api_key=SILICONFLOW_API_KEY,
     base_url=SILICONFLOW_BASE_URL,
     timeout=60.0,
+    max_retries=0,
+)
+dashscope_client = OpenAI(
+    api_key=config.DASHSCOPE_API_KEY or "not-configured",
+    base_url=config.DASHSCOPE_BASE_URL,
+    timeout=60.0,
+    max_retries=0,
 )
 
 # Blocklist cache
@@ -71,15 +78,14 @@ def _is_on_blocklist(domain: str) -> bool:
 
 
 def _classify_url_with_llm(url: str) -> str:
-    """Use SiliconFlow to classify a URL as SAFE, BAN, or REVIEW."""
-    try:
-        model = config.SILICONFLOW_MODEL
-        create_kwargs = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": f"""You moderate links for a game community. Treat all languages/regions equally.
+    """Classify a URL with SiliconFlow first and DashScope as fallback."""
+    model = config.SILICONFLOW_MODEL
+    create_kwargs = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": f"""You moderate links for a game community. Treat all languages/regions equally.
 Classify this URL as SAFE or BAN.
 
 BAN if the URL looks like:
@@ -95,30 +101,64 @@ SAFE if it is a normal well-known site or ordinary content shared in discussion
 URL: {url}
 
 Respond with exactly one word: SAFE or BAN"""
-                }
-            ],
-            "max_tokens": 64,
-            "temperature": 0,
-        }
-        if should_disable_thinking(model):
-            create_kwargs["extra_body"] = {"enable_thinking": False}
-        response = client.chat.completions.create(**create_kwargs)
-        message_obj = response.choices[0].message
-        content = message_obj.content or ""
-        reasoning = (
-            getattr(message_obj, "reasoning_content", None)
-            or getattr(message_obj, "reasoning", None)
-            or ""
+            }
+        ],
+        "max_tokens": 64,
+        "temperature": 0,
+    }
+    if should_disable_thinking(model):
+        create_kwargs["extra_body"] = {"enable_thinking": False}
+
+    providers = [("siliconflow", client, model, create_kwargs)]
+    if config.DASHSCOPE_API_KEY:
+        fallback_kwargs = dict(create_kwargs)
+        fallback_kwargs["model"] = config.DASHSCOPE_VISION_MODEL
+        fallback_kwargs.pop("extra_body", None)
+        providers.append(
+            (
+                "dashscope",
+                dashscope_client,
+                config.DASHSCOPE_VISION_MODEL,
+                fallback_kwargs,
+            )
         )
-        text = content.strip().upper()
-        if text in {"SAFE", "BAN"}:
-            return text
-        match = re.search(r"\b(BAN|SAFE)\b", (content or reasoning).upper())
-        # Unparseable model output is a classification failure, not a SAFE pass.
-        return match.group(1) if match else "REVIEW"
-    except Exception as e:
-        logging.error(f"URL LLM classification error: {e}")
-        return "REVIEW"
+
+    for provider, provider_client, provider_model, provider_kwargs in providers:
+        try:
+            logging.info(
+                "URL classification requesting provider=%s model=%s",
+                provider,
+                provider_model,
+            )
+            response = provider_client.chat.completions.create(**provider_kwargs)
+            message_obj = response.choices[0].message
+            content = message_obj.content or ""
+            reasoning = (
+                getattr(message_obj, "reasoning_content", None)
+                or getattr(message_obj, "reasoning", None)
+                or ""
+            )
+            text = content.strip().upper()
+            if text in {"SAFE", "BAN"}:
+                return text
+            match = re.search(
+                r"\b(BAN|SAFE)\b",
+                f"{content}\n{reasoning}".upper(),
+            )
+            if match:
+                return match.group(1)
+            logging.warning(
+                "URL classification returned an unparseable %s response",
+                provider,
+            )
+        except Exception as e:
+            logging.error("URL %s classification error: %s", provider, e)
+
+    if not config.DASHSCOPE_API_KEY:
+        logging.warning(
+            "URL classification fallback unavailable: DASHSCOPE_API_KEY is empty"
+        )
+    return "REVIEW"
 
 
 def analyze_urls(text: str) -> str:

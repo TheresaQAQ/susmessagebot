@@ -55,6 +55,16 @@ def _openai_connection_error(message="Connection failed"):
 
 
 class UrlModeratorRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.dashscope_key = patch(
+            "susmessagebot.url_moderator.config.DASHSCOPE_API_KEY",
+            "",
+        )
+        self.dashscope_key.start()
+
+    def tearDown(self):
+        self.dashscope_key.stop()
+
     @patch(
         "susmessagebot.url_moderator.client.chat.completions.create",
         side_effect=RuntimeError("API unavailable"),
@@ -253,6 +263,16 @@ class GithubSyncDedupTests(unittest.TestCase):
 
 
 class ClassifierFailureRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.dashscope_key = patch(
+            "susmessagebot.moderator.config.DASHSCOPE_API_KEY",
+            "",
+        )
+        self.dashscope_key.start()
+
+    def tearDown(self):
+        self.dashscope_key.stop()
+
     @patch.object(
         moderator._text_client.chat.completions,
         "create",
@@ -268,6 +288,37 @@ class ClassifierFailureRegressionTests(unittest.TestCase):
     ):
         self.assertEqual(moderator.classify_message("hello"), "REVIEW")
         create.assert_called_once()
+
+    @patch("susmessagebot.moderator.config.DASHSCOPE_API_KEY", "test-key")
+    @patch.object(moderator.dashscope_client.chat.completions, "create")
+    @patch.object(moderator, "render_prompt", return_value="rules")
+    @patch.object(moderator, "get_similar_examples", return_value="")
+    def test_text_exhausts_siliconflow_retries_then_uses_dashscope(
+        self,
+        get_examples,
+        render_prompt,
+        dashscope_create,
+    ):
+        dashscope_create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="BAN", reasoning=None)
+                )
+            ]
+        )
+        with patch.object(
+            moderator._text_client.chat.completions,
+            "create",
+            side_effect=[_openai_connection_error() for _ in range(4)],
+        ) as siliconflow_create, patch.object(moderator.time, "sleep"):
+            self.assertEqual(moderator.classify_message("hello"), "BAN")
+
+        self.assertEqual(siliconflow_create.call_count, 4)
+        dashscope_create.assert_called_once()
+        self.assertEqual(
+            dashscope_create.call_args.kwargs["model"],
+            "qwen3-vl-flash",
+        )
 
     @patch.object(moderator, "render_prompt", return_value="rules")
     @patch.object(moderator, "get_similar_examples", return_value="")
@@ -468,6 +519,22 @@ class ClassifierFailureRegressionTests(unittest.TestCase):
 
 
 class EvaluationResumeRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.moderator_dashscope_key = patch(
+            "susmessagebot.moderator.config.DASHSCOPE_API_KEY",
+            "",
+        )
+        self.url_dashscope_key = patch(
+            "susmessagebot.url_moderator.config.DASHSCOPE_API_KEY",
+            "",
+        )
+        self.moderator_dashscope_key.start()
+        self.url_dashscope_key.start()
+
+    def tearDown(self):
+        self.url_dashscope_key.stop()
+        self.moderator_dashscope_key.stop()
+
     def test_resume_reuses_only_the_same_evaluation_case(self):
         row = {
             "index": 62,
@@ -497,12 +564,14 @@ class EvaluationResumeRegressionTests(unittest.TestCase):
         self.assertEqual(moderator.classify_image(b"not an image"), "REVIEW")
 
     @patch.object(moderator.client.chat.completions, "create")
+    @patch.object(moderator.dashscope_client.chat.completions, "create")
     @patch.object(moderator, "render_prompt", return_value="image rules")
     @patch.object(moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,x")
     def test_image_uses_separate_prompt_version(
         self,
         image_to_data_url,
         render_prompt,
+        dashscope_create,
         create,
     ):
         create.return_value = SimpleNamespace(
@@ -516,6 +585,67 @@ class EvaluationResumeRegressionTests(unittest.TestCase):
         self.assertEqual(moderator.classify_image(b"image"), "SAFE")
         image_to_data_url.assert_called_once_with(b"image")
         render_prompt.assert_called_once_with(moderator.IMAGE_PROMPT_ID, "")
+        dashscope_create.assert_not_called()
+
+    @patch("susmessagebot.moderator.config.DASHSCOPE_API_KEY", "test-key")
+    @patch.object(moderator.dashscope_client.chat.completions, "create")
+    @patch.object(moderator.client.chat.completions, "create")
+    @patch.object(moderator, "render_prompt", return_value="image rules")
+    @patch.object(moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,x")
+    def test_image_uses_dashscope_when_siliconflow_fails(
+        self,
+        image_to_data_url,
+        render_prompt,
+        siliconflow_create,
+        dashscope_create,
+    ):
+        siliconflow_create.side_effect = RuntimeError("API unavailable")
+        dashscope_create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+
+        self.assertEqual(moderator.classify_image(b"image"), "SAFE")
+        self.assertEqual(
+            dashscope_create.call_args.kwargs["model"],
+            "qwen3-vl-flash",
+        )
+        self.assertNotIn("extra_body", dashscope_create.call_args.kwargs)
+        siliconflow_create.assert_called_once()
+
+    @patch("susmessagebot.moderator.config.DASHSCOPE_API_KEY", "test-key")
+    @patch.object(moderator.dashscope_client.chat.completions, "create")
+    @patch.object(moderator.client.chat.completions, "create")
+    @patch.object(moderator, "render_prompt", return_value="image rules")
+    @patch.object(moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,x")
+    def test_unparseable_image_verdict_uses_dashscope(
+        self,
+        image_to_data_url,
+        render_prompt,
+        siliconflow_create,
+        dashscope_create,
+    ):
+        siliconflow_create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="maybe", reasoning=None)
+                )
+            ]
+        )
+        dashscope_create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+
+        self.assertEqual(moderator.classify_image(b"image"), "SAFE")
+        siliconflow_create.assert_called_once()
+        dashscope_create.assert_called_once()
 
     def test_unparseable_verdict_requests_manual_review(self):
         self.assertEqual(moderator._parse_verdict(""), "REVIEW")
@@ -536,6 +666,66 @@ class EvaluationResumeRegressionTests(unittest.TestCase):
             url_moderator._classify_url_with_llm("https://unknown.example"),
             "REVIEW",
         )
+
+    @patch("susmessagebot.url_moderator.config.DASHSCOPE_API_KEY", "test-key")
+    @patch(
+        "susmessagebot.url_moderator.dashscope_client.chat.completions.create",
+    )
+    @patch(
+        "susmessagebot.url_moderator.client.chat.completions.create",
+        side_effect=RuntimeError("API unavailable"),
+    )
+    def test_url_error_uses_dashscope(self, siliconflow_create, dashscope_create):
+        dashscope_create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="BAN", reasoning=None)
+                )
+            ]
+        )
+
+        self.assertEqual(
+            url_moderator._classify_url_with_llm("https://unknown.example"),
+            "BAN",
+        )
+        siliconflow_create.assert_called_once()
+        dashscope_create.assert_called_once()
+        self.assertEqual(
+            dashscope_create.call_args.kwargs["model"],
+            "qwen3-vl-flash",
+        )
+
+    @patch("susmessagebot.url_moderator.config.DASHSCOPE_API_KEY", "test-key")
+    @patch(
+        "susmessagebot.url_moderator.dashscope_client.chat.completions.create",
+    )
+    @patch("susmessagebot.url_moderator.client.chat.completions.create")
+    def test_unparseable_url_verdict_uses_dashscope(
+        self,
+        siliconflow_create,
+        dashscope_create,
+    ):
+        siliconflow_create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="maybe", reasoning=None)
+                )
+            ]
+        )
+        dashscope_create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+
+        self.assertEqual(
+            url_moderator._classify_url_with_llm("https://unknown.example"),
+            "SAFE",
+        )
+        siliconflow_create.assert_called_once()
+        dashscope_create.assert_called_once()
 
     @patch.object(url_moderator, "_blocklist", {"evil.example"})
     @patch.object(url_moderator, "_classify_url_with_llm", return_value="REVIEW")
@@ -2415,6 +2605,9 @@ class ConfigDefaultTests(unittest.TestCase):
             "SILICONFLOW_VISION_MODEL=Qwen/Qwen3-VL-8B-Instruct",
             env_example,
         )
+        self.assertIn('"qwen3-vl-flash"', config_src)
+        self.assertIn("DASHSCOPE_API_KEY=", env_example)
+        self.assertIn("DASHSCOPE_VISION_MODEL=qwen3-vl-flash", env_example)
         self.assertIn("defaults to `Qwen/Qwen2.5-7B-Instruct`", readme)
 
 

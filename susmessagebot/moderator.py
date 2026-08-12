@@ -24,8 +24,15 @@ client = OpenAI(
     api_key=SILICONFLOW_API_KEY,
     base_url=SILICONFLOW_BASE_URL,
     timeout=60.0,
+    max_retries=0,
 )
 _text_client = client.with_options(max_retries=0)
+dashscope_client = OpenAI(
+    api_key=config.DASHSCOPE_API_KEY or "not-configured",
+    base_url=config.DASHSCOPE_BASE_URL,
+    timeout=60.0,
+    max_retries=0,
+)
 
 PROMPT_ID = os.getenv("PROMPT_ID", DEFAULT_PROMPT_ID)
 IMAGE_PROMPT_ID = os.getenv("IMAGE_PROMPT_ID", "v4_zh_multilingual")
@@ -75,6 +82,41 @@ def _verdict_from_response(response) -> tuple[str, str, str]:
         if reasoned != "REVIEW":
             result = reasoned
     return result, content, reasoning
+
+
+def _classify_with_dashscope(create_kwargs: dict, request_type: str) -> str:
+    """Run one bounded DashScope fallback request."""
+    if not config.DASHSCOPE_API_KEY:
+        logging.warning(
+            "%s classification fallback unavailable: DASHSCOPE_API_KEY is empty",
+            request_type.capitalize(),
+        )
+        return "REVIEW"
+
+    fallback_kwargs = dict(create_kwargs)
+    fallback_kwargs["model"] = config.DASHSCOPE_VISION_MODEL
+    fallback_kwargs.pop("extra_body", None)
+    try:
+        logging.info(
+            "%s classification falling back to provider=dashscope model=%s",
+            request_type.capitalize(),
+            config.DASHSCOPE_VISION_MODEL,
+        )
+        response = dashscope_client.chat.completions.create(**fallback_kwargs)
+        result, content, reasoning = _verdict_from_response(response)
+        logging.info(
+            "classify_%s provider=dashscope model=%s raw=%r "
+            "reasoning_tail=%r verdict=%s",
+            request_type,
+            config.DASHSCOPE_VISION_MODEL,
+            content[:80],
+            str(reasoning)[-120:],
+            result,
+        )
+        return result
+    except Exception as e:
+        logging.error("%s DashScope fallback error: %s", request_type.capitalize(), e)
+        return "REVIEW"
 
 
 def _extract_error_details(error: Exception) -> tuple[int | None, str, str]:
@@ -238,7 +280,7 @@ def classify_message(message: str) -> str:
                 error_code or "-",
                 error_message[:300],
             )
-            return "REVIEW"
+            break
 
         logging.info(
             "classify_message prompt=%s model=%s attempt=%s/%s raw=%r "
@@ -251,9 +293,15 @@ def classify_message(message: str) -> str:
             str(reasoning)[-120:],
             result,
         )
-        return result
+        if result != "REVIEW":
+            return result
+        logging.warning(
+            "Text classification returned an unparseable SiliconFlow response; "
+            "using DashScope fallback"
+        )
+        break
 
-    return "REVIEW"
+    return _classify_with_dashscope(create_kwargs, "message")
 
 
 def classify_image(image_bytes: bytes) -> str:
@@ -292,18 +340,34 @@ def classify_image(image_bytes: bytes) -> str:
         }
         if _should_disable_thinking(vision_model):
             create_kwargs["extra_body"] = {"enable_thinking": False}
+    except Exception as e:
+        logging.error("Image classification setup error: %s", e)
+        return "REVIEW"
 
+    try:
+        logging.info(
+            "Image classification requesting provider=siliconflow model=%s",
+            vision_model,
+        )
         response = client.chat.completions.create(**create_kwargs)
         result, content, reasoning = _verdict_from_response(response)
         logging.info(
-            "classify_image prompt=%s model=%s raw=%r reasoning_tail=%r verdict=%s",
+            "classify_image prompt=%s provider=%s model=%s raw=%r "
+            "reasoning_tail=%r verdict=%s",
             IMAGE_PROMPT_ID,
+            "siliconflow",
             vision_model,
             content[:80],
             str(reasoning)[-120:],
             result,
         )
-        return result
+        if result != "REVIEW":
+            return result
+        logging.warning(
+            "Image classification returned an unparseable SiliconFlow response; "
+            "using DashScope fallback"
+        )
     except Exception as e:
-        logging.error("Image classification error: %s", e)
-        return "REVIEW"
+        logging.error("Image SiliconFlow classification error: %s", e)
+
+    return _classify_with_dashscope(create_kwargs, "image")
