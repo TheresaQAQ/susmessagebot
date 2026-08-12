@@ -174,3 +174,5 @@ python -m susmessagebot.bot
 
 Health: `http://127.0.0.1:8001/health` (200 only after Discord gateway ready)  
 Metrics: `http://127.0.0.1:8000/metrics`
+
+<!-- Cursor multi-file change demo: README -->

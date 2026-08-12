@@ -28,6 +28,7 @@ client = OpenAI(
 _text_client = client.with_options(max_retries=0)
 
 PROMPT_ID = os.getenv("PROMPT_ID", DEFAULT_PROMPT_ID)
+IMAGE_PROMPT_ID = os.getenv("IMAGE_PROMPT_ID", "v4_zh_multilingual")
 _TEXT_REQUEST_TIMEOUT_SECONDS = 30.0
 _TEXT_REQUEST_RETRIES = 3
 _TEXT_RETRY_BASE_SECONDS = 2.0
@@ -262,8 +263,8 @@ def classify_image(image_bytes: bytes) -> str:
     """
     try:
         data_url = _image_to_data_url(image_bytes)
-        # No text for RAG; keep the same rules prompt with empty examples.
-        system_prompt = render_prompt(PROMPT_ID, "")
+        # Image moderation has no text query for RAG and uses its own prompt version.
+        system_prompt = render_prompt(IMAGE_PROMPT_ID, "")
         vision_model = config.SILICONFLOW_VISION_MODEL or config.SILICONFLOW_MODEL
         create_kwargs = {
             "model": vision_model,
@@ -296,7 +297,7 @@ def classify_image(image_bytes: bytes) -> str:
         result, content, reasoning = _verdict_from_response(response)
         logging.info(
             "classify_image prompt=%s model=%s raw=%r reasoning_tail=%r verdict=%s",
-            PROMPT_ID,
+            IMAGE_PROMPT_ID,
             vision_model,
             content[:80],
             str(reasoning)[-120:],

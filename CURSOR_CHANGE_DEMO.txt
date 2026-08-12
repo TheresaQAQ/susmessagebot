@@ -1,0 +1,3 @@
+Cursor change demo
+Created to verify that file changes are visible.
+Updated during the multi-file visibility test.

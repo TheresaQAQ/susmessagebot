@@ -496,6 +496,27 @@ class EvaluationResumeRegressionTests(unittest.TestCase):
     def test_invalid_image_requests_manual_review(self):
         self.assertEqual(moderator.classify_image(b"not an image"), "REVIEW")
 
+    @patch.object(moderator.client.chat.completions, "create")
+    @patch.object(moderator, "render_prompt", return_value="image rules")
+    @patch.object(moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,x")
+    def test_image_uses_separate_prompt_version(
+        self,
+        image_to_data_url,
+        render_prompt,
+        create,
+    ):
+        create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="SAFE", reasoning=None)
+                )
+            ]
+        )
+
+        self.assertEqual(moderator.classify_image(b"image"), "SAFE")
+        image_to_data_url.assert_called_once_with(b"image")
+        render_prompt.assert_called_once_with(moderator.IMAGE_PROMPT_ID, "")
+
     def test_unparseable_verdict_requests_manual_review(self):
         self.assertEqual(moderator._parse_verdict(""), "REVIEW")
         self.assertEqual(moderator._parse_verdict("I cannot decide"), "REVIEW")

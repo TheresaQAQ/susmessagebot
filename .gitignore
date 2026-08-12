@@ -33,7 +33,7 @@ eval_results.jsonl
 *.log
 bakeoff.log
 
-# OS / editor
+# OS / editor files
 .DS_Store
 Thumbs.db
 .idea/

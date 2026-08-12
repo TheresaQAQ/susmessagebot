@@ -36,3 +36,5 @@ If you find cases where the bot is incorrectly classifying messages:
 - Never commit API keys or tokens
 - Test your changes locally before submitting a PR
 - Keep code changes minimal and focused
+
+<!-- Cursor multi-file change demo: contributing guide -->
