@@ -306,14 +306,20 @@ def classify_message(message: str) -> str:
 
 def classify_image(image_bytes: bytes) -> str:
     """
-    Classify an image attachment via multimodal LLM (no OCR).
+    Classify an image attachment via DashScope multimodal LLM (no OCR).
     Return REVIEW on errors so callers can request manual moderation.
     """
+    if not config.DASHSCOPE_API_KEY:
+        logging.warning(
+            "Image classification unavailable: DASHSCOPE_API_KEY is empty"
+        )
+        return "REVIEW"
+
     try:
         data_url = _image_to_data_url(image_bytes)
         # Image moderation has no text query for RAG and uses its own prompt version.
         system_prompt = render_prompt(IMAGE_PROMPT_ID, "")
-        vision_model = config.SILICONFLOW_VISION_MODEL or config.SILICONFLOW_MODEL
+        vision_model = config.DASHSCOPE_VISION_MODEL
         create_kwargs = {
             "model": vision_model,
             "messages": [
@@ -338,36 +344,28 @@ def classify_image(image_bytes: bytes) -> str:
             "max_tokens": 64,
             "temperature": 0,
         }
-        if _should_disable_thinking(vision_model):
-            create_kwargs["extra_body"] = {"enable_thinking": False}
     except Exception as e:
         logging.error("Image classification setup error: %s", e)
         return "REVIEW"
 
     try:
         logging.info(
-            "Image classification requesting provider=siliconflow model=%s",
+            "Image classification requesting provider=dashscope model=%s",
             vision_model,
         )
-        response = client.chat.completions.create(**create_kwargs)
+        response = dashscope_client.chat.completions.create(**create_kwargs)
         result, content, reasoning = _verdict_from_response(response)
         logging.info(
             "classify_image prompt=%s provider=%s model=%s raw=%r "
             "reasoning_tail=%r verdict=%s",
             IMAGE_PROMPT_ID,
-            "siliconflow",
+            "dashscope",
             vision_model,
             content[:80],
             str(reasoning)[-120:],
             result,
         )
-        if result != "REVIEW":
-            return result
-        logging.warning(
-            "Image classification returned an unparseable SiliconFlow response; "
-            "using DashScope fallback"
-        )
+        return result
     except Exception as e:
-        logging.error("Image SiliconFlow classification error: %s", e)
-
-    return _classify_with_dashscope(create_kwargs, "image")
+        logging.error("Image DashScope classification error: %s", e)
+        return "REVIEW"

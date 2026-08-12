@@ -85,7 +85,7 @@ I seek your kind understanding for any teething issues.
 - Add the following to your `.env` file:
   - `SILICONFLOW_API_KEY` — obtain from [cloud.siliconflow.cn](https://cloud.siliconflow.cn)
   - `SILICONFLOW_MODEL` — optional, defaults to `Qwen/Qwen2.5-7B-Instruct`
-  - `DASHSCOPE_API_KEY` — optional Alibaba Cloud Model Studio key used when SiliconFlow fails
+  - `DASHSCOPE_API_KEY` — Alibaba Cloud Model Studio key required for image moderation and used when SiliconFlow text/URL requests fail
   - `DASHSCOPE_BASE_URL` — optional, defaults to the Beijing OpenAI-compatible endpoint
   - `DASHSCOPE_VISION_MODEL` — optional, defaults to `qwen3-vl-flash`
   - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python -m susmessagebot.bot`
@@ -97,7 +97,7 @@ I seek your kind understanding for any teething issues.
 
 `Qwen/Qwen2.5-7B-Instruct` — free model on SiliconFlow (OpenAI-compatible). `Qwen/Qwen3.5-4B` is also listed but currently often times out; keep `enable_thinking=false` for Qwen3/3.5 thinking models.
 
-Text, image, and URL moderation use SiliconFlow first. If its request fails or returns an unparseable verdict, the bot falls back once to Alibaba Cloud Model Studio `qwen3-vl-flash` through its OpenAI-compatible API. If the fallback is unavailable or also fails, the result is `REVIEW`.
+Image moderation always uses Alibaba Cloud Model Studio `qwen3-vl-flash`. Text and URL moderation use SiliconFlow first, then fall back once to the same DashScope model if SiliconFlow fails or returns an unparseable verdict. If the required image backend or a fallback is unavailable, the result is `REVIEW`.
 
 ## CI/CD (Discord on VPS + Docker)
 

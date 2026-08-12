@@ -18,15 +18,8 @@ SILICONFLOW_MODEL = os.getenv(
     "SILICONFLOW_MODEL",
     os.getenv("OPENROUTER_MODEL", "Qwen/Qwen2.5-7B-Instruct"),
 )
-# Vision-capable model for image moderation (text-only defaults cannot see images).
-# Qwen2.5-VL-* was removed from SiliconFlow; Qwen3-VL-8B is the smallest Instruct VLM.
-SILICONFLOW_VISION_MODEL = os.getenv(
-    "SILICONFLOW_VISION_MODEL",
-    "Qwen/Qwen3-VL-8B-Instruct",
-)
-
 # Alibaba Cloud Model Studio (DashScope) OpenAI-compatible fallback backend.
-# Text, image, and URL moderation use it when SiliconFlow fails.
+# Image moderation always uses it; text and URL moderation use it as fallback.
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL = os.getenv(
     "DASHSCOPE_BASE_URL",

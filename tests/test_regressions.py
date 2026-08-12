@@ -563,18 +563,19 @@ class EvaluationResumeRegressionTests(unittest.TestCase):
     def test_invalid_image_requests_manual_review(self):
         self.assertEqual(moderator.classify_image(b"not an image"), "REVIEW")
 
-    @patch.object(moderator.client.chat.completions, "create")
+    @patch("susmessagebot.moderator.config.DASHSCOPE_API_KEY", "test-key")
     @patch.object(moderator.dashscope_client.chat.completions, "create")
+    @patch.object(moderator.client.chat.completions, "create")
     @patch.object(moderator, "render_prompt", return_value="image rules")
     @patch.object(moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,x")
     def test_image_uses_separate_prompt_version(
         self,
         image_to_data_url,
         render_prompt,
+        siliconflow_create,
         dashscope_create,
-        create,
     ):
-        create.return_value = SimpleNamespace(
+        dashscope_create.return_value = SimpleNamespace(
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(content="SAFE", reasoning=None)
@@ -585,21 +586,21 @@ class EvaluationResumeRegressionTests(unittest.TestCase):
         self.assertEqual(moderator.classify_image(b"image"), "SAFE")
         image_to_data_url.assert_called_once_with(b"image")
         render_prompt.assert_called_once_with(moderator.IMAGE_PROMPT_ID, "")
-        dashscope_create.assert_not_called()
+        dashscope_create.assert_called_once()
+        siliconflow_create.assert_not_called()
 
     @patch("susmessagebot.moderator.config.DASHSCOPE_API_KEY", "test-key")
     @patch.object(moderator.dashscope_client.chat.completions, "create")
     @patch.object(moderator.client.chat.completions, "create")
     @patch.object(moderator, "render_prompt", return_value="image rules")
     @patch.object(moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,x")
-    def test_image_uses_dashscope_when_siliconflow_fails(
+    def test_image_uses_dashscope_without_siliconflow_request(
         self,
         image_to_data_url,
         render_prompt,
         siliconflow_create,
         dashscope_create,
     ):
-        siliconflow_create.side_effect = RuntimeError("API unavailable")
         dashscope_create.return_value = SimpleNamespace(
             choices=[
                 SimpleNamespace(
@@ -614,37 +615,30 @@ class EvaluationResumeRegressionTests(unittest.TestCase):
             "qwen3-vl-flash",
         )
         self.assertNotIn("extra_body", dashscope_create.call_args.kwargs)
-        siliconflow_create.assert_called_once()
+        siliconflow_create.assert_not_called()
 
     @patch("susmessagebot.moderator.config.DASHSCOPE_API_KEY", "test-key")
     @patch.object(moderator.dashscope_client.chat.completions, "create")
     @patch.object(moderator.client.chat.completions, "create")
     @patch.object(moderator, "render_prompt", return_value="image rules")
     @patch.object(moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,x")
-    def test_unparseable_image_verdict_uses_dashscope(
+    def test_unparseable_dashscope_image_verdict_requests_manual_review(
         self,
         image_to_data_url,
         render_prompt,
         siliconflow_create,
         dashscope_create,
     ):
-        siliconflow_create.return_value = SimpleNamespace(
+        dashscope_create.return_value = SimpleNamespace(
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(content="maybe", reasoning=None)
                 )
             ]
         )
-        dashscope_create.return_value = SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="SAFE", reasoning=None)
-                )
-            ]
-        )
 
-        self.assertEqual(moderator.classify_image(b"image"), "SAFE")
-        siliconflow_create.assert_called_once()
+        self.assertEqual(moderator.classify_image(b"image"), "REVIEW")
+        siliconflow_create.assert_not_called()
         dashscope_create.assert_called_once()
 
     def test_unparseable_verdict_requests_manual_review(self):
@@ -2601,8 +2595,8 @@ class ConfigDefaultTests(unittest.TestCase):
 
         self.assertIn('"Qwen/Qwen2.5-7B-Instruct"', config_src)
         self.assertIn("SILICONFLOW_MODEL=Qwen/Qwen2.5-7B-Instruct", env_example)
-        self.assertIn(
-            "SILICONFLOW_VISION_MODEL=Qwen/Qwen3-VL-8B-Instruct",
+        self.assertNotIn(
+            "SILICONFLOW_VISION_MODEL",
             env_example,
         )
         self.assertIn('"qwen3-vl-flash"', config_src)
