@@ -263,6 +263,10 @@ def init_review_notifications_table():
         CREATE INDEX IF NOT EXISTS idx_review_notifications_pending_user
         ON review_notifications (guild_id, user_id, resolved_at, created_at)
     ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_review_notifications_pending_message
+        ON review_notifications (guild_id, message_id, user_id, resolved_at)
+    ''')
     conn.commit()
     conn.close()
 
@@ -373,6 +377,29 @@ def claim_related_review_notifications(
             raise
     finally:
         conn.close()
+
+
+def list_pending_review_notifications(
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+) -> list[tuple[int, int]]:
+    """Return ``(dm_channel_id, dm_message_id)`` for unresolved cards of this review."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT dm_channel_id, dm_message_id
+        FROM review_notifications
+        WHERE guild_id = ? AND message_id = ? AND user_id = ?
+          AND resolved_at IS NULL
+        ORDER BY dm_message_id
+        """,
+        (guild_id, message_id, user_id),
+    )
+    rows = [tuple(map(int, row)) for row in cursor.fetchall()]
+    conn.close()
+    return rows
 
 
 def mark_review_notification_resolved(dm_message_id: int) -> None:

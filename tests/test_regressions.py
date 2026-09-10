@@ -1724,6 +1724,28 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
             message=SimpleNamespace(content=content, attachments=attachments or []),
         )
 
+    @staticmethod
+    def _isolated_stats_db():
+        directory = tempfile.TemporaryDirectory()
+        return str(Path(directory.name) / "stats.db"), directory
+
+    async def test_list_pending_review_notifications_skips_resolved_and_other_messages(self):
+        old_db_path = stats.DB_PATH
+        stats.DB_PATH, tmp_dir = self._isolated_stats_db()
+        try:
+            stats.init_db()
+            stats.store_review_notification(1, 42, 7, 10, 2001, 1001)
+            stats.store_review_notification(1, 42, 7, 11, 2002, 1002)
+            stats.store_review_notification(1, 43, 7, 11, 2002, 1003)
+            stats.mark_review_notification_resolved(1001)
+            self.assertEqual(
+                stats.list_pending_review_notifications(1, 42, 7),
+                [(2002, 1002)],
+            )
+        finally:
+            stats.DB_PATH = old_db_path
+            tmp_dir.cleanup()
+
     async def test_image_only_review_hides_internal_placeholder(self):
         admin = SimpleNamespace(id=10, send=AsyncMock())
         author = SimpleNamespace(id=7)
@@ -1915,6 +1937,247 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(second, (0, 0))
         finally:
             stats.DB_PATH = old_db_path
+
+    async def test_successful_delete_refreshes_other_admin_review_dm(self):
+        old_db_path = stats.DB_PATH
+        stats.DB_PATH, tmp_dir = self._isolated_stats_db()
+        try:
+            stats.init_db()
+            stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
+            stats.store_review_notification(1, 42, 7, 10, 2001, 1001)
+            stats.store_review_notification(1, 42, 7, 11, 2002, 1002)
+
+            original = (
+                "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
+                "｜**#ads**（Test Guild）\n\n"
+                "👤 用户：tester (`7`)\n\n"
+                "📝 内容：\nscam text"
+            )
+            peer = SimpleNamespace(content=original, edit=AsyncMock())
+            reviewed = SimpleNamespace(delete=AsyncMock())
+            source_channel = SimpleNamespace(
+                name="ads",
+                fetch_message=AsyncMock(return_value=reviewed),
+            )
+            guild = SimpleNamespace(
+                id=1,
+                name="Test Guild",
+                owner_id=10,
+                get_member=MagicMock(
+                    return_value=SimpleNamespace(
+                        id=10,
+                        guild_permissions=SimpleNamespace(administrator=True),
+                    )
+                ),
+                get_channel_or_thread=MagicMock(return_value=source_channel),
+            )
+            interaction = self._admin_interaction(
+                guild,
+                user_id=10,
+                content=original,
+            )
+            interaction.message.id = 1001
+            interaction.client.get_channel = MagicMock(
+                side_effect=lambda channel_id: (
+                    SimpleNamespace(fetch_message=AsyncMock(return_value=peer))
+                    if channel_id == 2002
+                    else None
+                )
+            )
+            interaction.client.fetch_channel = AsyncMock()
+            button = bot_discord.HITLDeleteButton(1, 7, 42, 9)
+
+            with (
+                patch.object(bot_discord, "add_example"),
+                patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                patch.object(bot_discord, "_dm_user", AsyncMock()),
+            ):
+                await button.callback(interaction)
+
+            peer.edit.assert_awaited_once()
+            kwargs = peer.edit.await_args.kwargs
+            self.assertIsNone(kwargs["view"])
+            self.assertIn("已删除该消息，未封禁用户", kwargs["content"])
+            self.assertIn("处理管理员", kwargs["content"])
+            self.assertEqual(stats.list_pending_review_notifications(1, 42, 7), [])
+        finally:
+            stats.DB_PATH = old_db_path
+            tmp_dir.cleanup()
+
+    async def test_successful_false_alarm_refreshes_other_admin_review_dm(self):
+        old_db_path = stats.DB_PATH
+        stats.DB_PATH, tmp_dir = self._isolated_stats_db()
+        try:
+            stats.init_db()
+            stats.store_review_evidence(1, 42, 7, "scam text", "Suspicious message")
+            stats.store_review_notification(1, 42, 7, 10, 2001, 1001)
+            stats.store_review_notification(1, 42, 7, 11, 2002, 1002)
+
+            original = (
+                "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
+                "｜**#ads**（Test Guild）\n\n"
+                "👤 用户：tester (`7`)\n\n"
+                "📝 内容：\nscam text"
+            )
+            peer = SimpleNamespace(content=original, edit=AsyncMock())
+            guild = SimpleNamespace(
+                id=1,
+                owner_id=10,
+                get_member=MagicMock(
+                    return_value=SimpleNamespace(
+                        id=10,
+                        guild_permissions=SimpleNamespace(administrator=True),
+                    )
+                ),
+                unban=AsyncMock(),
+            )
+            interaction = self._admin_interaction(
+                guild,
+                user_id=10,
+                content=original,
+            )
+            interaction.message.id = 1001
+            interaction.client.get_channel = MagicMock(
+                side_effect=lambda channel_id: (
+                    SimpleNamespace(fetch_message=AsyncMock(return_value=peer))
+                    if channel_id == 2002
+                    else None
+                )
+            )
+            interaction.client.fetch_channel = AsyncMock()
+            button = bot_discord.HITLFalseAlarmButton(1, 7, 42, 9)
+
+            with (
+                patch.object(bot_discord, "strikes", StrikeTracker(db_path=stats.DB_PATH)),
+                patch.object(bot_discord, "add_example"),
+                patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                patch.object(bot_discord, "increment_stat"),
+                patch.object(bot_discord, "get_stat", return_value=1),
+            ):
+                await button.callback(interaction)
+
+            peer.edit.assert_awaited_once()
+            kwargs = peer.edit.await_args.kwargs
+            self.assertIsNone(kwargs["view"])
+            self.assertIn("判定为误报", kwargs["content"])
+            self.assertEqual(stats.list_pending_review_notifications(1, 42, 7), [])
+        finally:
+            stats.DB_PATH = old_db_path
+            tmp_dir.cleanup()
+
+    async def test_successful_ban_refreshes_same_card_and_closes_related(self):
+        old_db_path = stats.DB_PATH
+        stats.DB_PATH, tmp_dir = self._isolated_stats_db()
+        try:
+            stats.init_db()
+            current_message_id = stats._discord_snowflake_for_unix_time(
+                time.time() - 60
+            )
+            related_message_id = stats._discord_snowflake_for_unix_time(
+                time.time() - 30
+            )
+            stats.store_review_evidence(
+                1,
+                current_message_id,
+                7,
+                "scam text",
+                "Suspicious message",
+            )
+            for source_message_id, dm_channel_id, dm_message_id, admin_id in (
+                (current_message_id, 2001, 1001, 10),
+                (current_message_id, 2002, 1002, 11),
+                (related_message_id, 2001, 1003, 10),
+                (related_message_id, 2002, 1004, 11),
+            ):
+                stats.store_review_notification(
+                    1,
+                    source_message_id,
+                    7,
+                    admin_id,
+                    dm_channel_id,
+                    dm_message_id,
+                )
+
+            original = (
+                "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
+                "｜**#ads**（Test Guild）\n\n"
+                "👤 用户：tester (`7`)\n\n"
+                "📝 内容：\nscam text"
+            )
+            messages = {
+                message_id: SimpleNamespace(content=original, edit=AsyncMock())
+                for message_id in (1002, 1003, 1004)
+            }
+            channels = {
+                2001: SimpleNamespace(
+                    fetch_message=AsyncMock(
+                        side_effect=lambda message_id: messages[message_id]
+                    )
+                ),
+                2002: SimpleNamespace(
+                    fetch_message=AsyncMock(
+                        side_effect=lambda message_id: messages[message_id]
+                    )
+                ),
+            }
+            guild = SimpleNamespace(
+                id=1,
+                name="Test Guild",
+                owner_id=10,
+                get_member=MagicMock(
+                    return_value=SimpleNamespace(
+                        id=10,
+                        guild_permissions=SimpleNamespace(administrator=True),
+                    )
+                ),
+                get_channel=MagicMock(return_value=SimpleNamespace(name="ads")),
+                get_channel_or_thread=MagicMock(return_value=SimpleNamespace(name="ads")),
+            )
+            interaction = self._admin_interaction(
+                guild,
+                user_id=10,
+                content=original,
+            )
+            interaction.message.id = 1001
+            interaction.client.get_channel = MagicMock(
+                side_effect=lambda channel_id: channels[channel_id]
+            )
+            interaction.client.fetch_channel = AsyncMock()
+            button = bot_discord.HITLBanButton(1, 7, current_message_id, 9)
+
+            with (
+                patch.object(bot_discord, "add_example"),
+                patch.object(bot_discord, "sync_example_to_github", return_value=True),
+                patch.object(bot_discord, "increment_stat"),
+                patch.object(bot_discord, "get_stat", return_value=1),
+                patch.object(
+                    bot_discord,
+                    "_delete_reviewed_message",
+                    AsyncMock(return_value="deleted"),
+                ),
+                patch.object(bot_discord, "_execute_ban", AsyncMock()),
+            ):
+                await button.callback(interaction)
+
+            same_card = messages[1002].edit.await_args.kwargs
+            self.assertIsNone(same_card["view"])
+            self.assertIn("已删除该消息并封禁用户", same_card["content"])
+            self.assertNotIn("该消息已随封禁操作删除", same_card["content"])
+            for message_id in (1003, 1004):
+                related = messages[message_id].edit.await_args.kwargs
+                self.assertIsNone(related["view"])
+                self.assertIn("该消息已随封禁操作删除", related["content"])
+            self.assertEqual(
+                stats.list_pending_review_notifications(1, current_message_id, 7),
+                [],
+            )
+            self.assertEqual(
+                stats.list_pending_review_notifications(1, related_message_id, 7),
+                [],
+            )
+        finally:
+            stats.DB_PATH = old_db_path
+            tmp_dir.cleanup()
 
     async def test_related_ban_leaves_reviews_older_than_cleanup_window_open(self):
         old_db_path = stats.DB_PATH
@@ -2165,6 +2428,48 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
                 execute_ban.assert_not_awaited()
         finally:
             stats.DB_PATH = old_db_path
+
+    async def test_stale_second_admin_click_rewrites_local_card(self):
+        old_db_path = stats.DB_PATH
+        stats.DB_PATH, tmp_dir = self._isolated_stats_db()
+        try:
+            stats.init_db()
+            stats.claim_review_decision(1, 42, 7, "delete", 10)
+            stats.store_review_notification(1, 42, 7, 11, 2002, 1002)
+
+            original = (
+                "⚠️ 检测到可疑内容，等待管理员处理（消息未删除）"
+                "｜**#ads**（Test Guild）\n\n"
+                "👤 用户：tester (`7`)\n\n"
+                "📝 内容：\nscam text"
+            )
+            guild = SimpleNamespace(
+                owner_id=10,
+                get_member=MagicMock(
+                    return_value=SimpleNamespace(
+                        id=11,
+                        guild_permissions=SimpleNamespace(administrator=True),
+                    )
+                ),
+            )
+            interaction = self._admin_interaction(guild, content=original)
+            interaction.message.id = 1002
+            interaction.message.edit = AsyncMock()
+            button = bot_discord.HITLBanButton(1, 7, 42, 9)
+
+            with patch.object(bot_discord, "_execute_ban", AsyncMock()) as execute_ban:
+                await button.callback(interaction)
+
+            interaction.response.send_message.assert_awaited_once()
+            execute_ban.assert_not_awaited()
+            interaction.message.edit.assert_awaited_once()
+            kwargs = interaction.message.edit.await_args.kwargs
+            self.assertIsNone(kwargs["view"])
+            self.assertIn("已由其他管理员删除该消息", kwargs["content"])
+            self.assertEqual(stats.list_pending_review_notifications(1, 42, 7), [])
+        finally:
+            stats.DB_PATH = old_db_path
+            tmp_dir.cleanup()
 
     async def test_false_alarm_on_prior_strike_unbans_auto_banned_user(self):
         old_db_path = stats.DB_PATH

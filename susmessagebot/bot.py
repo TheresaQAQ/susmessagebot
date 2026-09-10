@@ -36,6 +36,7 @@ from .stats import (
     get_review_reason,
     store_review_notification,
     claim_related_review_notifications,
+    list_pending_review_notifications,
     mark_review_notification_resolved,
     record_auto_ban,
     clear_auto_ban,
@@ -842,19 +843,50 @@ async def _claim_or_reject_review(
         f"该审核已被其他管理员处理（{existing}）。",
         ephemeral=True,
     )
+    await _refresh_stale_review_card(
+        interaction,
+        existing,
+        owner[1] if owner else None,
+    )
     return None
 
 
-async def _edit_review_message(
-    interaction: discord.Interaction,
-    content: str,
-    *,
-    view: discord.ui.View | None = None,
-    keep_view: bool = False,
-) -> None:
-    """Mark the decision while retaining the review's source and evidence."""
-    original = ((interaction.message.content if interaction.message else "") or "").strip()
-    lines = original.splitlines()
+_STALE_REVIEW_STATUS = {
+    "ban": "🚫 已由其他管理员删除并封禁该用户。",
+    "delete": "🗑️ 已由其他管理员删除该消息。",
+    "false_alarm": "❌ 已由其他管理员判定为误报。",
+    "covered_by_ban": (
+        "🚫 用户已封禁，该消息已随封禁操作删除（最近 24 小时清理范围）。"
+    ),
+}
+
+
+class _ReviewModeratorRef:
+    """Fallback label when the deciding admin object is no longer cached."""
+
+    def __init__(self, user_id: int):
+        self.id = user_id
+
+    def __str__(self) -> str:
+        return "其他管理员"
+
+
+def _moderator_from_id(client: discord.Client, user_id: int) -> object:
+    getter = getattr(client, "get_user", None)
+    if callable(getter):
+        user = getter(user_id)
+        if user is not None:
+            return user
+    return _ReviewModeratorRef(user_id)
+
+
+def _resolved_review_content(
+    original: str,
+    status: str,
+    moderator: discord.abc.User,
+) -> str:
+    """Render a settled review card while retaining source and evidence."""
+    lines = (original or "").strip().splitlines()
 
     # Retry edits replace the previous status block instead of stacking it.
     if lines and lines[0].startswith("📌 处理状态："):
@@ -870,22 +902,15 @@ async def _edit_review_message(
         _, _, source = lines[0].partition("｜")
         lines[0] = f"📍 原始频道：{source}"
 
-    moderator = interaction.user
     moderator_id = getattr(moderator, "id", "unknown")
-    evidence = "\n".join(lines).strip()
     updated = (
-        f"📌 处理状态：{content}\n"
+        f"📌 处理状态：{status}\n"
         f"👮 处理管理员：{moderator} (`{moderator_id}`)"
     )
+    evidence = "\n".join(lines).strip()
     if evidence:
         updated += f"\n\n{evidence}"
-    kwargs: dict = {"content": updated[:2000]}
-    if keep_view:
-        # Leave existing components untouched.
-        pass
-    else:
-        kwargs["view"] = view
-    await interaction.edit_original_response(**kwargs)
+    return updated[:2000]
 
 
 def _related_ban_review_content(
@@ -893,27 +918,176 @@ def _related_ban_review_content(
     moderator: discord.abc.User,
 ) -> str:
     """Render a pending review card closed by a ban on a related card."""
-    lines = (original or "").strip().splitlines()
-    if lines and lines[0].startswith("📌 处理状态："):
-        lines.pop(0)
-        if lines and lines[0].startswith("👮 处理管理员："):
-            lines.pop(0)
-        if lines and not lines[0].strip():
-            lines.pop(0)
-    if lines and lines[0].startswith("⚠️ ") and "｜" in lines[0]:
-        _, _, source = lines[0].partition("｜")
-        lines[0] = f"📍 原始频道：{source}"
-
-    moderator_id = getattr(moderator, "id", "unknown")
-    updated = (
-        "📌 处理状态：🚫 用户已封禁，该消息已随封禁操作删除"
-        "（最近 24 小时清理范围）。\n"
-        f"👮 处理管理员：{moderator} (`{moderator_id}`)"
+    return _resolved_review_content(
+        original,
+        "🚫 用户已封禁，该消息已随封禁操作删除（最近 24 小时清理范围）。",
+        moderator,
     )
-    evidence = "\n".join(lines).strip()
-    if evidence:
-        updated += f"\n\n{evidence}"
-    return updated[:2000]
+
+
+def _interaction_review_dm_id(
+    interaction: discord.Interaction,
+    *,
+    edit_succeeded: bool,
+) -> int | None:
+    if not edit_succeeded:
+        return None
+    message_id = getattr(interaction.message, "id", None)
+    return message_id if isinstance(message_id, int) else None
+
+
+async def _edit_stored_review_dms(
+    client: discord.Client,
+    rows: list[tuple[int, int]],
+    *,
+    already_edited_dm_message_id: int | None,
+    render_content,
+) -> tuple[int, int]:
+    """Best-effort edit stored admin review DMs and mark them resolved."""
+    updated = 0
+    failed = 0
+    for dm_channel_id, dm_message_id in rows:
+        if dm_message_id == already_edited_dm_message_id:
+            mark_review_notification_resolved(dm_message_id)
+            updated += 1
+            continue
+        try:
+            channel = client.get_channel(dm_channel_id)
+            if channel is None:
+                channel = await client.fetch_channel(dm_channel_id)
+            review_message = await channel.fetch_message(dm_message_id)
+            await review_message.edit(
+                content=render_content(review_message.content),
+                view=None,
+            )
+            mark_review_notification_resolved(dm_message_id)
+            updated += 1
+        except discord.NotFound:
+            mark_review_notification_resolved(dm_message_id)
+        except Exception as e:
+            failed += 1
+            logging.warning(
+                "Could not refresh review DM %s in channel %s: %s",
+                dm_message_id,
+                dm_channel_id,
+                e,
+            )
+    return updated, failed
+
+
+async def _refresh_peer_review_notifications(
+    client: discord.Client,
+    *,
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    moderator: discord.abc.User,
+    status: str,
+    already_edited_dm_message_id: int | None = None,
+) -> tuple[int, int]:
+    """Push the settled status onto every admin copy of this review card."""
+    rows = list_pending_review_notifications(guild_id, message_id, user_id)
+    return await _edit_stored_review_dms(
+        client,
+        rows,
+        already_edited_dm_message_id=already_edited_dm_message_id,
+        render_content=lambda original: _resolved_review_content(
+            original,
+            status,
+            moderator,
+        ),
+    )
+
+
+async def _sync_review_decision_to_admins(
+    interaction: discord.Interaction,
+    *,
+    guild_id: int,
+    message_id: int,
+    user_id: int,
+    status: str,
+    current_edit_succeeded: bool,
+) -> None:
+    """Refresh other admins' pending cards after a successful decision."""
+    already_edited_dm_message_id = _interaction_review_dm_id(
+        interaction,
+        edit_succeeded=current_edit_succeeded,
+    )
+    try:
+        updated, failed = await _refresh_peer_review_notifications(
+            interaction.client,
+            guild_id=guild_id,
+            message_id=message_id,
+            user_id=user_id,
+            moderator=interaction.user,
+            status=status,
+            already_edited_dm_message_id=already_edited_dm_message_id,
+        )
+        logging.info(
+            "Refreshed peer review DMs for guild %s message %s: "
+            "%s updated, %s failed",
+            guild_id,
+            message_id,
+            updated,
+            failed,
+        )
+    except Exception as e:
+        logging.error(
+            "Could not refresh peer review DMs for guild %s message %s: %s",
+            guild_id,
+            message_id,
+            e,
+        )
+
+
+async def _refresh_stale_review_card(
+    interaction: discord.Interaction,
+    decision: str,
+    decided_by: int | None,
+) -> None:
+    """If a second admin still has buttons, rewrite that card in place."""
+    message = interaction.message
+    edit = getattr(message, "edit", None)
+    if message is None or not callable(edit):
+        return
+    status = _STALE_REVIEW_STATUS.get(
+        decision,
+        f"已被其他管理员处理（{decision}）。",
+    )
+    moderator = (
+        _moderator_from_id(interaction.client, decided_by)
+        if decided_by is not None
+        else _ReviewModeratorRef(0)
+    )
+    try:
+        await edit(
+            content=_resolved_review_content(message.content or "", status, moderator),
+            view=None,
+        )
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, int):
+            mark_review_notification_resolved(message_id)
+    except Exception as e:
+        logging.warning("Could not refresh stale review card: %s", e)
+
+
+async def _edit_review_message(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    view: discord.ui.View | None = None,
+    keep_view: bool = False,
+) -> None:
+    """Mark the decision while retaining the review's source and evidence."""
+    original = ((interaction.message.content if interaction.message else "") or "").strip()
+    updated = _resolved_review_content(original, content, interaction.user)
+    kwargs: dict = {"content": updated}
+    if keep_view:
+        # Leave existing components untouched.
+        pass
+    else:
+        kwargs["view"] = view
+    await interaction.edit_original_response(**kwargs)
 
 
 async def _close_related_ban_reviews(
@@ -933,38 +1107,15 @@ async def _close_related_ban_reviews(
         moderator.id,
         max_age_seconds=_BAN_DELETE_MESSAGE_SECONDS,
     )
-    updated = 0
-    failed = 0
-    for dm_channel_id, dm_message_id, _ in rows:
-        if dm_message_id == already_edited_dm_message_id:
-            mark_review_notification_resolved(dm_message_id)
-            updated += 1
-            continue
-        try:
-            channel = client.get_channel(dm_channel_id)
-            if channel is None:
-                channel = await client.fetch_channel(dm_channel_id)
-            review_message = await channel.fetch_message(dm_message_id)
-            await review_message.edit(
-                content=_related_ban_review_content(
-                    review_message.content,
-                    moderator,
-                ),
-                view=None,
-            )
-            mark_review_notification_resolved(dm_message_id)
-            updated += 1
-        except discord.NotFound:
-            mark_review_notification_resolved(dm_message_id)
-        except Exception as e:
-            failed += 1
-            logging.warning(
-                "Could not close related review DM %s in channel %s: %s",
-                dm_message_id,
-                dm_channel_id,
-                e,
-            )
-    return updated, failed
+    return await _edit_stored_review_dms(
+        client,
+        [(dm_channel_id, dm_message_id) for dm_channel_id, dm_message_id, _ in rows],
+        already_edited_dm_message_id=already_edited_dm_message_id,
+        render_content=lambda original: _related_ban_review_content(
+            original,
+            moderator,
+        ),
+    )
 
 
 async def _require_interaction_admin(
@@ -1180,9 +1331,18 @@ class HITLBanButton(
             current_edit_succeeded = True
         except Exception as e:
             logging.error(f"Ban succeeded but review message edit failed: {e}")
-        current_dm_message_id = getattr(interaction.message, "id", None)
-        if not isinstance(current_dm_message_id, int) or not current_edit_succeeded:
-            current_dm_message_id = None
+        await _sync_review_decision_to_admins(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            status=result,
+            current_edit_succeeded=current_edit_succeeded,
+        )
+        current_dm_message_id = _interaction_review_dm_id(
+            interaction,
+            edit_succeeded=current_edit_succeeded,
+        )
         try:
             updated, failed = await _close_related_ban_reviews(
                 interaction.client,
@@ -1324,10 +1484,20 @@ class HITLDeleteButton(
         else:
             result = "ℹ️ 原消息已不存在，未封禁用户，也未发送删除通知。"
 
+        current_edit_succeeded = False
         try:
             await _edit_review_message(interaction, result)
+            current_edit_succeeded = True
         except Exception as e:
             logging.error(f"Delete succeeded but review message edit failed: {e}")
+        await _sync_review_decision_to_admins(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            status=result,
+            current_edit_succeeded=current_edit_succeeded,
+        )
 
 
 class HITLFalseAlarmButton(
@@ -1448,13 +1618,21 @@ class HITLFalseAlarmButton(
                 )
                 return
 
+        result = f"❌ 判定为误报。{unban_note} 违规计数已清零。"
+        current_edit_succeeded = False
         try:
-            await _edit_review_message(
-                interaction,
-                f"❌ 判定为误报。{unban_note} 违规计数已清零。",
-            )
+            await _edit_review_message(interaction, result)
+            current_edit_succeeded = True
         except Exception as e:
             logging.error(f"False alarm succeeded but review message edit failed: {e}")
+        await _sync_review_decision_to_admins(
+            interaction,
+            guild_id=self.guild_id,
+            message_id=self.message_id,
+            user_id=self.user_id,
+            status=result,
+            current_edit_succeeded=current_edit_succeeded,
+        )
 
 
 class HITLView(discord.ui.View):
