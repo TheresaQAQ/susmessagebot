@@ -1,7 +1,7 @@
 openai
 chromadb
 sentence-transformers
-python-dotenv
+PyYAML
 pysqlite3-binary; sys_platform == "linux"
 requests
 prometheus_client

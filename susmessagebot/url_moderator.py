@@ -11,7 +11,7 @@ from .config import (
 from .llm_utils import should_disable_thinking
 
 client = OpenAI(
-    api_key=SILICONFLOW_API_KEY,
+    api_key=SILICONFLOW_API_KEY or "not-configured",
     base_url=SILICONFLOW_BASE_URL,
     timeout=60.0,
     max_retries=0,

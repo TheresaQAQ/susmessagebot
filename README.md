@@ -80,18 +80,18 @@ I seek your kind understanding for any teething issues.
 
 ## Setup Differences from Main Branch:
 
-- Replace `OLLAMA_MODEL` and `OLLAMA_HOST` in config with `SILICONFLOW_API_KEY` (and optional `SILICONFLOW_MODEL`)
+- Replace `OLLAMA_MODEL` and `OLLAMA_HOST` in config with `siliconflow.api_key` (and optional `siliconflow.model`)
 - No `ollama pull` step required
-- Add the following to your `.env` file:
-  - `SILICONFLOW_API_KEY` — obtain from [cloud.siliconflow.cn](https://cloud.siliconflow.cn)
-  - `SILICONFLOW_MODEL` — optional, defaults to `Qwen/Qwen2.5-7B-Instruct`
-  - `DASHSCOPE_API_KEY` — Alibaba Cloud Model Studio key required for image moderation and used when SiliconFlow text/URL requests fail
-  - `DASHSCOPE_BASE_URL` — optional, defaults to the Beijing OpenAI-compatible endpoint
-  - `DASHSCOPE_VISION_MODEL` — optional, defaults to `qwen3-vl-flash`
-  - `DISCORD_BOT_TOKEN` — Discord bot token; run with `python -m susmessagebot.bot`
-  - `GITHUB_TOKEN` — GitHub Personal Access Token with `Contents: Read and Write` permission
-  - `GITHUB_REPO` — this repository (e.g. `TheresaQAQ/susmessagebot`)
-  - `GITHUB_BRANCH` — branch to sync examples to (e.g. `main`)
+- Copy `config.example.yaml` to `config.yaml` and set:
+  - `siliconflow.api_key` — obtain from [cloud.siliconflow.cn](https://cloud.siliconflow.cn)
+  - `siliconflow.model` — optional, defaults to `Qwen/Qwen2.5-7B-Instruct`
+  - `dashscope.api_key` — Alibaba Cloud Model Studio key required for image moderation and used when SiliconFlow text/URL requests fail
+  - `dashscope.base_url` — optional, defaults to the Beijing OpenAI-compatible endpoint
+  - `dashscope.vision_model` — optional, defaults to `qwen3-vl-flash`
+  - `discord.bot_token` — Discord bot token; run with `python -m susmessagebot.bot`
+  - `github.token` — GitHub Personal Access Token with `Contents: Read and Write` permission
+  - `github.repo` — this repository (e.g. `TheresaQAQ/susmessagebot`)
+  - `github.branch` — branch to sync examples to (e.g. `main`)
 
 ## Model Used:
 
@@ -109,7 +109,7 @@ Production path for `main`:
 4. VPS 用裸 `docker pull` + `docker run` 拉起精确 SHA 镜像（适配无 Compose 插件环境）。
 5. Deploy waits until `http://127.0.0.1:8001/health` reports Discord readiness; on failure it rolls back to the previous image.
 
-Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`, …) stay on the VPS in `/opt/susmessagebot-secrets/.env` and are **not** stored as GitHub Actions secrets. The bot's secrets are isolated from FeedLink.
+Application secrets (`discord.bot_token`, `siliconflow.api_key`, `github.token`, …) stay on the VPS in `/opt/susmessagebot-secrets/config.yaml` and are **not** stored as GitHub Actions secrets. The bot's secrets are isolated from FeedLink.
 
 ### GitHub Actions secrets
 
@@ -126,15 +126,13 @@ Application secrets (`DISCORD_BOT_TOKEN`, `SILICONFLOW_API_KEY`, `GITHUB_TOKEN`,
 ```bash
 # Docker Engine is enough (Compose CLI not required). Then:
 sudo mkdir -p /opt/susmessagebot-secrets
-sudo touch /opt/susmessagebot-secrets/.env
+sudo cp config.example.yaml /opt/susmessagebot-secrets/config.yaml
 sudo chmod 700 /opt/susmessagebot-secrets
-sudo chmod 600 /opt/susmessagebot-secrets/.env
+sudo chmod 600 /opt/susmessagebot-secrets/config.yaml
 
-# Edit .env directly on the VPS. At minimum, set:
-# DISCORD_BOT_TOKEN, SILICONFLOW_API_KEY, SILICONFLOW_MODEL,
-# DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, DASHSCOPE_VISION_MODEL,
-# GITHUB_TOKEN, GITHUB_REPO, and GITHUB_BRANCH.
-sudo nano /opt/susmessagebot-secrets/.env
+# Edit config.yaml on the VPS. Set discord.bot_token, siliconflow.*,
+# dashscope.*, github.*, and runtime.data_dir: /app/data
+sudo nano /opt/susmessagebot-secrets/config.yaml
 
 # Stop the old systemd unit so the Discord token is not used twice:
 #   sudo systemctl stop susmessagebot
@@ -159,8 +157,7 @@ IMAGE=ghcr.io/<owner>/susmessagebot:<previous-sha>
 sudo docker pull "$IMAGE"
 sudo docker rm -f susmessagebot
 sudo docker run -d --name susmessagebot --restart unless-stopped \
-  --env-file /opt/susmessagebot-secrets/.env \
-  -e DATA_DIR=/app/data -e HEALTH_PORT=8001 -e METRICS_PORT=8000 \
+  -v /opt/susmessagebot-secrets/config.yaml:/app/config.yaml:ro \
   -v susmessagebot_data:/app/data \
   -p 127.0.0.1:8000:8000 -p 127.0.0.1:8001:8001 \
   --health-cmd='curl -fsS http://127.0.0.1:8001/health || exit 1' \
@@ -174,7 +171,7 @@ sudo docker run -d --name susmessagebot --restart unless-stopped \
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements-vps.txt
-cp .env.example .env   # fill tokens
+cp config.example.yaml config.yaml   # fill tokens
 python -m susmessagebot.bot
 ```
 

@@ -3,15 +3,11 @@ services:
     image: ${IMAGE:-ghcr.io/theresaqaq/susmessagebot:latest}
     container_name: susmessagebot
     restart: unless-stopped
-    env_file:
-      - /opt/susmessagebot-secrets/.env
     environment:
-      DATA_DIR: /app/data
-      HEALTH_PORT: "8001"
-      METRICS_PORT: "8000"
       TOKENIZERS_PARALLELISM: "false"
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
     volumes:
+      - /opt/susmessagebot-secrets/config.yaml:/app/config.yaml:ro
       - susmessagebot_data:/app/data
     ports:
       - "127.0.0.1:8000:8000"

@@ -1,0 +1,28 @@
+discord:
+  bot_token: ""
+  appeal_user_id: ""
+siliconflow:
+  api_key: ""
+  model: Qwen/Qwen2.5-7B-Instruct
+  base_url: https://api.siliconflow.cn/v1
+dashscope:
+  api_key: ""
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  vision_model: qwen3-vl-flash
+jev:
+  api_key: ""
+  base_url: https://ai-gateway.vercel.sh/v1
+  model: typesafe-ai/jev
+  text_classifier: jev_cascade
+github:
+  token: ""
+  repo: ""
+  branch: main
+prompts:
+  text: v7_zh_hard_gates
+  image: v4_zh_multilingual
+runtime:
+  # Local default. On the VPS container set this to /app/data
+  data_dir: ./data
+  health_port: 8001
+  metrics_port: 8000

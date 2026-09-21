@@ -2,7 +2,6 @@ import base64
 import io
 import logging
 import math
-import os
 import random
 import re
 import time
@@ -17,13 +16,13 @@ from .config import (
 )
 from .jev_client import classify_with_jev
 from .llm_utils import should_disable_thinking
-from .prompt_loader import DEFAULT_PROMPT_ID, render_prompt
+from .prompt_loader import render_prompt
 from .text_context import ContextTurn, format_text_classification_prompt
 from .utils import normalize_text
 from .vector_store import get_similar_examples
 
 client = OpenAI(
-    api_key=SILICONFLOW_API_KEY,
+    api_key=SILICONFLOW_API_KEY or "not-configured",
     base_url=SILICONFLOW_BASE_URL,
     timeout=60.0,
     max_retries=0,
@@ -36,8 +35,8 @@ dashscope_client = OpenAI(
     max_retries=0,
 )
 
-PROMPT_ID = os.getenv("PROMPT_ID", DEFAULT_PROMPT_ID)
-IMAGE_PROMPT_ID = os.getenv("IMAGE_PROMPT_ID", "v4_zh_multilingual")
+PROMPT_ID = config.PROMPT_ID
+IMAGE_PROMPT_ID = config.IMAGE_PROMPT_ID
 _TEXT_REQUEST_TIMEOUT_SECONDS = 30.0
 _TEXT_REQUEST_RETRIES = 3
 _TEXT_RETRY_BASE_SECONDS = 2.0

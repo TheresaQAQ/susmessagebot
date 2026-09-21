@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import time
 import unittest
@@ -3258,19 +3259,116 @@ class ConfigDefaultTests(unittest.TestCase):
     def test_default_text_model_matches_readme(self):
         root = Path(__file__).resolve().parents[1]
         config_src = (root / "susmessagebot" / "config.py").read_text(encoding="utf-8")
-        env_example = (root / ".env.example").read_text(encoding="utf-8")
+        example = (root / "config.example.yaml").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
 
         self.assertIn('"Qwen/Qwen2.5-7B-Instruct"', config_src)
-        self.assertIn("SILICONFLOW_MODEL=Qwen/Qwen2.5-7B-Instruct", env_example)
-        self.assertNotIn(
-            "SILICONFLOW_VISION_MODEL",
-            env_example,
-        )
+        self.assertIn("model: Qwen/Qwen2.5-7B-Instruct", example)
+        self.assertNotIn("SILICONFLOW_VISION_MODEL", example)
         self.assertIn('"qwen3-vl-flash"', config_src)
-        self.assertIn("DASHSCOPE_API_KEY=", env_example)
-        self.assertIn("DASHSCOPE_VISION_MODEL=qwen3-vl-flash", env_example)
+        self.assertIn("api_key:", example)
+        self.assertIn("vision_model: qwen3-vl-flash", example)
         self.assertIn("defaults to `Qwen/Qwen2.5-7B-Instruct`", readme)
+
+
+class YamlConfigTests(unittest.TestCase):
+    _SNAPSHOT_KEYS = (
+        "GITHUB_TOKEN",
+        "GITHUB_REPO",
+        "GITHUB_BRANCH",
+        "SILICONFLOW_API_KEY",
+        "SILICONFLOW_BASE_URL",
+        "SILICONFLOW_MODEL",
+        "DASHSCOPE_API_KEY",
+        "DASHSCOPE_BASE_URL",
+        "DASHSCOPE_VISION_MODEL",
+        "AI_GATEWAY_API_KEY",
+        "AI_GATEWAY_BASE_URL",
+        "JEV_MODEL",
+        "TEXT_CLASSIFIER",
+        "DISCORD_BOT_TOKEN",
+        "APPEAL_DISCORD_USER_ID",
+        "PROMPT_ID",
+        "IMAGE_PROMPT_ID",
+        "DATA_DIR",
+        "STATS_DB_PATH",
+        "CHROMA_DB_PATH",
+        "HEALTH_PORT",
+        "METRICS_PORT",
+    )
+
+    def setUp(self):
+        from susmessagebot import config
+
+        self.config = config
+        self._snapshot = {
+            name: getattr(config, name) for name in self._SNAPSHOT_KEYS
+        }
+
+    def tearDown(self):
+        for name, value in self._snapshot.items():
+            setattr(self.config, name, value)
+
+    def test_missing_file_uses_defaults(self):
+        missing = Path(tempfile.mkdtemp()) / "missing.yaml"
+        self.config.SILICONFLOW_MODEL = "changed"
+        self.config.DISCORD_BOT_TOKEN = "token"
+        self.config.load_config(missing)
+        self.assertEqual(
+            self.config.SILICONFLOW_MODEL,
+            "Qwen/Qwen2.5-7B-Instruct",
+        )
+        self.assertEqual(self.config.DISCORD_BOT_TOKEN, "")
+        self.assertEqual(self.config.TEXT_CLASSIFIER, "jev_cascade")
+        self.assertEqual(self.config.PROMPT_ID, "v7_zh_hard_gates")
+
+    def test_load_applies_nested_yaml_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                "\n".join(
+                    (
+                        "discord:",
+                        '  bot_token: "abc"',
+                        "siliconflow:",
+                        "  model: bakeoff/Override-Model",
+                        "jev:",
+                        "  text_classifier: siliconflow",
+                        "runtime:",
+                        f"  data_dir: {tmp}",
+                        "  health_port: 9001",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            self.config.load_config(path)
+            self.assertEqual(self.config.DISCORD_BOT_TOKEN, "abc")
+            self.assertEqual(self.config.SILICONFLOW_MODEL, "bakeoff/Override-Model")
+            self.assertEqual(self.config.TEXT_CLASSIFIER, "siliconflow")
+            self.assertEqual(self.config.HEALTH_PORT, 9001)
+            self.assertEqual(self.config.DATA_DIR, os.path.abspath(tmp))
+            self.assertEqual(
+                self.config.STATS_DB_PATH,
+                os.path.join(self.config.DATA_DIR, "stats.db"),
+            )
+
+    def test_save_then_load_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            self.config.DISCORD_BOT_TOKEN = "roundtrip-token"
+            self.config.SILICONFLOW_MODEL = "bakeoff/Override-Model"
+            self.config.AI_GATEWAY_API_KEY = "jev-key"
+            self.config.DATA_DIR = os.path.abspath(tmp)
+            self.config.HEALTH_PORT = 8123
+            self.config.save_config(path)
+            self.config.DISCORD_BOT_TOKEN = ""
+            self.config.SILICONFLOW_MODEL = "changed"
+            self.config.load_config(path)
+            self.assertEqual(self.config.DISCORD_BOT_TOKEN, "roundtrip-token")
+            self.assertEqual(self.config.SILICONFLOW_MODEL, "bakeoff/Override-Model")
+            self.assertEqual(self.config.AI_GATEWAY_API_KEY, "jev-key")
+            self.assertEqual(self.config.HEALTH_PORT, 8123)
+            self.assertEqual(self.config.DATA_DIR, os.path.abspath(tmp))
 
 
 class DeployWorkflowTests(unittest.TestCase):

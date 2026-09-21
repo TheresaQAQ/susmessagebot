@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import time
 from collections import Counter
 from datetime import datetime
@@ -452,7 +451,6 @@ def main() -> None:
         raise SystemExit(f"Unknown prompt version: {prompt_id}. Available: {list_prompt_ids()}")
 
     run = args.run if args.run > 0 else next_run_number(prompt_id)
-    os.environ["PROMPT_ID"] = prompt_id
     moderator.PROMPT_ID = prompt_id
 
     model = args.model or config.SILICONFLOW_MODEL
