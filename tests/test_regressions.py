@@ -3450,6 +3450,8 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertNotIn("config.yaml:ro", compose)
         self.assertIn("/app/config.yaml", workflow)
         self.assertIn("/app/config.yaml", compose)
+        self.assertIn('sudo chown 10001:10001 "$CONFIG_FILE"', workflow)
+        self.assertIn('sudo chmod 600 "$CONFIG_FILE"', workflow)
 
 
 class ThinkingFlagTests(unittest.TestCase):
