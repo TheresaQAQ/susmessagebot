@@ -1609,6 +1609,8 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "analyze_urls",
                 return_value="SAFE",
             ) as classify_urls,
+            patch.object(bot_discord, "increment_stat"),
+            patch.object(bot_discord, "get_stat", return_value=1),
             patch.object(bot_discord, "_ban_user", AsyncMock()),
             patch.object(bot_discord, "_request_manual_review", AsyncMock()),
         ):
