@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 config.yaml
+config.*.yaml
 !config.example.yaml
 
 # Python
@@ -28,6 +29,9 @@ stats.db
 *.db
 !*.sql
 data/
+
+# Local Jev demo / scratch
+tmp/jev/
 
 # Eval / bakeoff artifacts
 eval_results/
