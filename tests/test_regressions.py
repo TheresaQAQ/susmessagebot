@@ -4011,6 +4011,22 @@ class ConfigCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前配置", args[0])
         self.assertTrue(kwargs.get("ephemeral"))
 
+    def test_owner_check_uses_main_without_reimporting_bot(self):
+        from susmessagebot import config_commands
+
+        fake_main = SimpleNamespace(
+            _is_application_owner=lambda user_id: user_id == 42
+        )
+        modules = {"__main__": fake_main}
+        self.assertTrue(
+            config_commands._runtime_is_application_owner(42, modules)
+        )
+        self.assertFalse(
+            config_commands._runtime_is_application_owner(7, modules)
+        )
+        self.assertIs(config_commands._loaded_bot_module(modules), fake_main)
+        self.assertNotIn("susmessagebot.bot", modules)
+
 
 if __name__ == "__main__":
     unittest.main()

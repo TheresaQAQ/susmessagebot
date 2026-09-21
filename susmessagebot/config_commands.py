@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import discord
 from discord import app_commands
@@ -128,6 +129,33 @@ async def _user_is_shared_guild_admin(
     return False
 
 
+def _loaded_bot_module(modules: dict | None = None):
+    """Use the already-running bot module; never re-import susmessagebot.bot.
+
+    `python -m susmessagebot.bot` loads bot.py as `__main__`. Importing
+    `.bot` again would re-register Prometheus gauges and crash /config.
+    """
+    loaded = sys.modules if modules is None else modules
+    bot_mod = loaded.get("susmessagebot.bot")
+    if bot_mod is not None:
+        return bot_mod
+    main_mod = loaded.get("__main__")
+    if callable(getattr(main_mod, "_is_application_owner", None)):
+        return main_mod
+    return None
+
+
+def _runtime_is_application_owner(
+    user_id: int,
+    modules: dict | None = None,
+) -> bool:
+    module = _loaded_bot_module(modules)
+    if module is None:
+        return False
+    checker = getattr(module, "_is_application_owner", None)
+    return bool(checker(user_id)) if callable(checker) else False
+
+
 async def _require_config_admin(interaction: discord.Interaction) -> bool:
     if interaction.guild_id is not None:
         await interaction.response.send_message(
@@ -135,9 +163,7 @@ async def _require_config_admin(interaction: discord.Interaction) -> bool:
             ephemeral=True,
         )
         return False
-    from .bot import _is_application_owner
-
-    if _is_application_owner(interaction.user.id):
+    if _runtime_is_application_owner(interaction.user.id):
         return True
     if await _user_is_shared_guild_admin(interaction.client, interaction.user.id):
         return True
