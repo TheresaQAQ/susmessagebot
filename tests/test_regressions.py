@@ -190,8 +190,8 @@ class TextNormalizationTests(unittest.TestCase):
 
 
 class GithubSyncDedupTests(unittest.TestCase):
-    @patch.object(github_sync, "GITHUB_TOKEN", "token")
-    @patch.object(github_sync, "GITHUB_REPO", "TheresaQAQ/susmessagebot")
+    @patch("susmessagebot.github_sync.config.GITHUB_TOKEN", "token")
+    @patch("susmessagebot.github_sync.config.GITHUB_REPO", "TheresaQAQ/susmessagebot")
     @patch("susmessagebot.github_sync.requests.put")
     @patch("susmessagebot.github_sync.requests.get")
     def test_duplicate_example_is_not_rewritten(self, get, put):
@@ -208,8 +208,8 @@ class GithubSyncDedupTests(unittest.TestCase):
         self.assertTrue(github_sync.sync_example_to_github("hello", "BAN"))
         put.assert_not_called()
 
-    @patch.object(github_sync, "GITHUB_TOKEN", "token")
-    @patch.object(github_sync, "GITHUB_REPO", "TheresaQAQ/susmessagebot")
+    @patch("susmessagebot.github_sync.config.GITHUB_TOKEN", "token")
+    @patch("susmessagebot.github_sync.config.GITHUB_REPO", "TheresaQAQ/susmessagebot")
     @patch("susmessagebot.github_sync.requests.put")
     @patch("susmessagebot.github_sync.requests.get")
     def test_label_correction_rewrites_existing_seed(self, get, put):
@@ -232,8 +232,8 @@ class GithubSyncDedupTests(unittest.TestCase):
         self.assertNotIn('("hello", "BAN")', decoded)
         self.assertIn("Update example to SAFE", payload["message"])
 
-    @patch.object(github_sync, "GITHUB_TOKEN", "token")
-    @patch.object(github_sync, "GITHUB_REPO", "TheresaQAQ/susmessagebot")
+    @patch("susmessagebot.github_sync.config.GITHUB_TOKEN", "token")
+    @patch("susmessagebot.github_sync.config.GITHUB_REPO", "TheresaQAQ/susmessagebot")
     @patch("susmessagebot.github_sync.requests.put")
     @patch("susmessagebot.github_sync.requests.get")
     def test_legacy_conflicting_duplicates_are_consolidated(self, get, put):
@@ -1971,10 +1971,14 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
             bot_discord.HITLDeleteButton,
             bot_discord.HITLFalseAlarmButton,
         )
-        self.assertNotIn(
-            "Report to SusMessageBot",
-            [command.name for command in bot_discord.client.tree.get_commands()],
-        )
+        command_names = [
+            command.name for command in bot_discord.client.tree.get_commands()
+        ]
+        self.assertNotIn("Report to SusMessageBot", command_names)
+        self.assertIn("config", command_names)
+        config_cmd = bot_discord.client.tree.get_command("config")
+        self.assertTrue(config_cmd.guild_only)
+        self.assertTrue(config_cmd.default_permissions.administrator)
 
 
 class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -3383,6 +3387,11 @@ class DeployWorkflowTests(unittest.TestCase):
             workflow,
         )
         self.assertNotIn("compose up -d --remove-orphans || true", workflow)
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("config.yaml:ro", workflow)
+        self.assertNotIn("config.yaml:ro", compose)
+        self.assertIn("/app/config.yaml", workflow)
+        self.assertIn("/app/config.yaml", compose)
 
 
 class ThinkingFlagTests(unittest.TestCase):
@@ -3661,6 +3670,252 @@ class StrikePersistenceTests(unittest.TestCase):
                 return_value=now + 11,
             ):
                 self.assertEqual(tracker.count(1, 7), 0)
+
+
+class ConfigHotReloadTests(unittest.TestCase):
+    _SNAPSHOT_KEYS = YamlConfigTests._SNAPSHOT_KEYS
+
+    def setUp(self):
+        from susmessagebot import config
+
+        self.config = config
+        self._snapshot = {
+            name: getattr(config, name) for name in self._SNAPSHOT_KEYS
+        }
+        self._moderator_clients = (
+            moderator.client,
+            moderator._text_client,
+            moderator.dashscope_client,
+            moderator._CLIENT_GENERATION,
+        )
+        self._url_clients = (
+            url_moderator.client,
+            url_moderator.dashscope_client,
+            url_moderator._CLIENT_GENERATION,
+        )
+        self._moderator_prompts = (moderator.PROMPT_ID, moderator.IMAGE_PROMPT_ID)
+
+    def tearDown(self):
+        for name, value in self._snapshot.items():
+            setattr(self.config, name, value)
+        (
+            moderator.client,
+            moderator._text_client,
+            moderator.dashscope_client,
+            moderator._CLIENT_GENERATION,
+        ) = self._moderator_clients
+        (
+            url_moderator.client,
+            url_moderator.dashscope_client,
+            url_moderator._CLIENT_GENERATION,
+        ) = self._url_clients
+        moderator.PROMPT_ID, moderator.IMAGE_PROMPT_ID = self._moderator_prompts
+
+    def test_key_autocomplete_lists_classifier_and_prompts(self):
+        from susmessagebot.config_commands import autocomplete_keys
+
+        choices = autocomplete_keys("")
+        values = [choice.value for choice in choices]
+        names = [choice.name for choice in choices]
+        self.assertIn("jev.text_classifier", values)
+        self.assertIn("prompts.text", values)
+        self.assertIn("siliconflow.model", values)
+        self.assertTrue(any("文字分类器" in name for name in names))
+        self.assertNotIn("discord.bot_token", values)
+        self.assertEqual(autocomplete_keys("not-a-real-key"), [])
+
+    def test_value_autocomplete_uses_enums_and_skips_secrets(self):
+        from susmessagebot.config_commands import autocomplete_values
+
+        classifier = autocomplete_values("jev.text_classifier", "")
+        self.assertEqual(
+            {choice.value for choice in classifier},
+            {"jev_cascade", "siliconflow"},
+        )
+        self.assertTrue(any("级联" in choice.name for choice in classifier))
+
+        prompts = autocomplete_values("prompts.text", "")
+        self.assertIn("v7_zh_hard_gates", [choice.value for choice in prompts])
+        self.assertIn(
+            "v4_zh_multilingual",
+            [choice.value for choice in autocomplete_values("prompts.image", "")],
+        )
+
+        self.config.SILICONFLOW_MODEL = "already/Current"
+        models = autocomplete_values("siliconflow.model", "")
+        model_values = [choice.value for choice in models]
+        self.assertIn("already/Current", model_values)
+        self.assertIn("Qwen/Qwen2.5-7B-Instruct", model_values)
+
+        self.assertEqual(autocomplete_values("siliconflow.api_key", ""), [])
+        self.assertEqual(autocomplete_values("unknown.key", ""), [])
+
+    def test_forbid_discord_bot_token(self):
+        from susmessagebot.config import ConfigError
+
+        previous = self.config.DISCORD_BOT_TOKEN
+        with self.assertRaises(ConfigError) as ctx:
+            self.config.set_config_value("discord.bot_token", "leaked", persist=False)
+        self.assertIn("不能修改", str(ctx.exception))
+        self.assertEqual(self.config.DISCORD_BOT_TOKEN, previous)
+
+    def test_invalid_classifier_is_rejected(self):
+        from susmessagebot.config import ConfigError
+
+        with self.assertRaises(ConfigError) as ctx:
+            self.config.set_config_value(
+                "jev.text_classifier",
+                "nope",
+                persist=False,
+            )
+        self.assertIn("jev_cascade", str(ctx.exception))
+        self.assertIn("siliconflow", str(ctx.exception))
+
+    def test_set_model_and_classifier_are_live(self):
+        generation = moderator._CLIENT_GENERATION
+        self.config.set_config_value(
+            "siliconflow.model",
+            "bakeoff/Hot-Reload",
+            persist=False,
+        )
+        self.config.set_config_value(
+            "jev.text_classifier",
+            "siliconflow",
+            persist=False,
+        )
+        self.assertEqual(self.config.SILICONFLOW_MODEL, "bakeoff/Hot-Reload")
+        self.assertEqual(self.config.TEXT_CLASSIFIER, "siliconflow")
+        self.assertGreater(moderator._CLIENT_GENERATION, generation)
+
+        create = MagicMock(
+            return_value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="SAFE", reasoning_content=None)
+                    )
+                ]
+            )
+        )
+        with (
+            patch.object(self.config, "AI_GATEWAY_API_KEY", "should-not-use-jev"),
+            patch.object(moderator, "get_similar_examples", return_value=""),
+            patch.object(moderator, "render_prompt", return_value="rules"),
+            patch.object(moderator._text_client.chat.completions, "create", create),
+        ):
+            self.assertEqual(moderator.classify_message("hello"), "SAFE")
+        self.assertEqual(create.call_args.kwargs["model"], "bakeoff/Hot-Reload")
+
+    def test_set_secret_rebuilds_clients_and_show_masks(self):
+        from susmessagebot.config_commands import format_config_show
+
+        old_client = moderator.client
+        old_url_client = url_moderator.client
+        self.config.set_config_value(
+            "siliconflow.api_key",
+            "sk-secret-mlxi",
+            persist=False,
+        )
+        self.assertIsNot(moderator.client, old_client)
+        self.assertIsNot(url_moderator.client, old_url_client)
+        shown = format_config_show()
+        self.assertIn("****mlxi", shown)
+        self.assertNotIn("sk-secret-mlxi", shown)
+
+    def test_set_persists_to_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            self.config.set_config_value(
+                "siliconflow.model",
+                "persist/Model",
+                persist=True,
+                path=path,
+            )
+            saved = path.read_text(encoding="utf-8")
+            self.assertIn("persist/Model", saved)
+
+    def test_reload_overrides_memory_from_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                "\n".join(
+                    (
+                        "siliconflow:",
+                        "  model: reload/From-Disk",
+                        "jev:",
+                        "  text_classifier: siliconflow",
+                        "runtime:",
+                        f"  data_dir: {tmp}",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            self.config.SILICONFLOW_MODEL = "memory/Stale"
+            self.config.reload_runtime_config(path)
+            self.assertEqual(self.config.SILICONFLOW_MODEL, "reload/From-Disk")
+            self.assertEqual(self.config.TEXT_CLASSIFIER, "siliconflow")
+
+
+class ConfigCommandTests(unittest.IsolatedAsyncioTestCase):
+    def _interaction(self, *, admin=True, guild_id=1):
+        member = SimpleNamespace(
+            id=11 if admin else 99,
+            guild_permissions=SimpleNamespace(administrator=admin),
+        )
+        guild = SimpleNamespace(
+            owner_id=11,
+            get_member=MagicMock(return_value=member),
+            fetch_member=AsyncMock(return_value=member),
+        )
+        return SimpleNamespace(
+            guild_id=guild_id,
+            client=SimpleNamespace(get_guild=MagicMock(return_value=guild)),
+            user=SimpleNamespace(id=member.id),
+            response=SimpleNamespace(send_message=AsyncMock()),
+            namespace=SimpleNamespace(key=""),
+        )
+
+    async def test_non_admin_config_set_is_rejected(self):
+        from susmessagebot import config
+        from susmessagebot import config_commands
+
+        interaction = self._interaction(admin=False)
+        previous = config.SILICONFLOW_MODEL
+        await config_commands.config_set.callback(
+            interaction,
+            "siliconflow.model",
+            "should-not-apply",
+        )
+        interaction.response.send_message.assert_awaited()
+        args, kwargs = interaction.response.send_message.await_args
+        self.assertIn("仅管理员", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
+        self.assertEqual(config.SILICONFLOW_MODEL, previous)
+
+    async def test_set_rejects_bot_token(self):
+        from susmessagebot import config
+        from susmessagebot import config_commands
+
+        interaction = self._interaction()
+        previous = config.DISCORD_BOT_TOKEN
+        with patch.object(config, "save_config"):
+            await config_commands.config_set.callback(
+                interaction,
+                "discord.bot_token",
+                "leaked-token",
+            )
+        args, kwargs = interaction.response.send_message.await_args
+        self.assertIn("不能修改", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
+        self.assertEqual(config.DISCORD_BOT_TOKEN, previous)
+
+    async def test_dm_is_rejected(self):
+        from susmessagebot import config_commands
+
+        interaction = self._interaction(guild_id=None)
+        await config_commands.config_show.callback(interaction)
+        args, kwargs = interaction.response.send_message.await_args
+        self.assertIn("服务器", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
 
 
 if __name__ == "__main__":

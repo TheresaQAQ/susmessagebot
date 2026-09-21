@@ -4,24 +4,32 @@ import requests
 from urllib.parse import urlparse
 from openai import OpenAI
 from . import config
-from .config import (
-    SILICONFLOW_API_KEY,
-    SILICONFLOW_BASE_URL,
-)
 from .llm_utils import should_disable_thinking
 
-client = OpenAI(
-    api_key=SILICONFLOW_API_KEY or "not-configured",
-    base_url=SILICONFLOW_BASE_URL,
-    timeout=60.0,
-    max_retries=0,
-)
-dashscope_client = OpenAI(
-    api_key=config.DASHSCOPE_API_KEY or "not-configured",
-    base_url=config.DASHSCOPE_BASE_URL,
-    timeout=60.0,
-    max_retries=0,
-)
+client = None
+dashscope_client = None
+_CLIENT_GENERATION = 0
+
+
+def refresh_clients() -> None:
+    """Rebuild OpenAI clients from the current config module values."""
+    global client, dashscope_client, _CLIENT_GENERATION
+    client = OpenAI(
+        api_key=config.SILICONFLOW_API_KEY or "not-configured",
+        base_url=config.SILICONFLOW_BASE_URL,
+        timeout=60.0,
+        max_retries=0,
+    )
+    dashscope_client = OpenAI(
+        api_key=config.DASHSCOPE_API_KEY or "not-configured",
+        base_url=config.DASHSCOPE_BASE_URL,
+        timeout=60.0,
+        max_retries=0,
+    )
+    _CLIENT_GENERATION += 1
+
+
+refresh_clients()
 
 # Blocklist cache
 _blocklist: set = set()

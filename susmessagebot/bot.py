@@ -4,9 +4,9 @@ from .moderator import classify_message
 from .image_moderator import classify_image
 from .text_context import ContextTurn
 from .url_moderator import URL_PATTERN, analyze_urls, load_blocklist
+from . import config
 from .config import (
     DISCORD_BOT_TOKEN,
-    APPEAL_DISCORD_USER_ID,
     HEALTH_PORT,
     METRICS_PORT,
 )
@@ -87,11 +87,14 @@ class SusMessageBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        from .config_commands import register_config_commands
+
         self.add_dynamic_items(
             HITLBanButton,
             HITLDeleteButton,
             HITLFalseAlarmButton,
         )
+        register_config_commands(self.tree)
         synced = await self.tree.sync()
         logging.info(f"Synced {len(synced)} commands globally")
 
@@ -622,7 +625,7 @@ async def _execute_ban(
     evidence_images: list[tuple[str, bytes]] | None = None,
 ) -> None:
     """DM ban notice first (ban removes mutual servers), then ban and clear strikes."""
-    notice = ban_notice_text(APPEAL_DISCORD_USER_ID, automatic=automatic)
+    notice = ban_notice_text(config.APPEAL_DISCORD_USER_ID, automatic=automatic)
     if evidence_text is not None or evidence_images:
         notice = _user_notice_with_evidence(
             notice,

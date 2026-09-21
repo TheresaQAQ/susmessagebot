@@ -7,7 +7,7 @@ services:
       TOKENIZERS_PARALLELISM: "false"
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
     volumes:
-      - /opt/susmessagebot-secrets/config.yaml:/app/config.yaml:ro
+      - /opt/susmessagebot-secrets/config.yaml:/app/config.yaml
       - susmessagebot_data:/app/data
     ports:
       - "127.0.0.1:8000:8000"

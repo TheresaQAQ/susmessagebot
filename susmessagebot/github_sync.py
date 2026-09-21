@@ -4,16 +4,30 @@ import re
 
 import requests
 
-from .config import GITHUB_TOKEN, GITHUB_REPO, GITHUB_BRANCH
+from . import config
 
 SEEDS_PATH = "susmessagebot/seeds.py"
-API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{SEEDS_PATH}"
 REQUEST_TIMEOUT = (5, 20)
 
-HEADERS = {
-    "Authorization": f"Bearer {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github+json",
-}
+
+def _github_request_settings() -> tuple[str, str, str] | None:
+    token = config.GITHUB_TOKEN
+    repo = config.GITHUB_REPO
+    branch = config.GITHUB_BRANCH or "main"
+    if not token or not repo:
+        return None
+    return token, repo, branch
+
+
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def _github_api_url(repo: str) -> str:
+    return f"https://api.github.com/repos/{repo}/contents/{SEEDS_PATH}"
 
 
 def _quoted_message_variants(message: str) -> list[str]:
@@ -58,15 +72,20 @@ def sync_example_to_github(message: str, label: str) -> bool:
     Best-effort side channel: returns False on failure instead of raising, so
     moderation enforcement is never blocked by GitHub outages.
     """
-    if not GITHUB_TOKEN or not GITHUB_REPO:
+    settings = _github_request_settings()
+    if settings is None:
         logging.warning("GitHub sync skipped: GITHUB_TOKEN/GITHUB_REPO not configured")
         return False
 
+    token, repo, branch = settings
+    headers = _github_headers(token)
+    api_url = _github_api_url(repo)
+
     try:
         response = requests.get(
-            API_URL,
-            headers=HEADERS,
-            params={"ref": GITHUB_BRANCH},
+            api_url,
+            headers=headers,
+            params={"ref": branch},
             timeout=REQUEST_TIMEOUT,
         )
         if response.status_code != 200:
@@ -119,12 +138,12 @@ def sync_example_to_github(message: str, label: str) -> bool:
             "message": commit_message,
             "content": encoded,
             "sha": sha,
-            "branch": GITHUB_BRANCH,
+            "branch": branch,
         }
 
         put_response = requests.put(
-            API_URL,
-            headers=HEADERS,
+            api_url,
+            headers=headers,
             json=payload,
             timeout=REQUEST_TIMEOUT,
         )

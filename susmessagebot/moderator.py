@@ -10,10 +10,6 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 from PIL import Image
 
 from . import config
-from .config import (
-    SILICONFLOW_API_KEY,
-    SILICONFLOW_BASE_URL,
-)
 from .jev_client import classify_with_jev
 from .llm_utils import should_disable_thinking
 from .prompt_loader import render_prompt
@@ -21,22 +17,35 @@ from .text_context import ContextTurn, format_text_classification_prompt
 from .utils import normalize_text
 from .vector_store import get_similar_examples
 
-client = OpenAI(
-    api_key=SILICONFLOW_API_KEY or "not-configured",
-    base_url=SILICONFLOW_BASE_URL,
-    timeout=60.0,
-    max_retries=0,
-)
-_text_client = client.with_options(max_retries=0)
-dashscope_client = OpenAI(
-    api_key=config.DASHSCOPE_API_KEY or "not-configured",
-    base_url=config.DASHSCOPE_BASE_URL,
-    timeout=60.0,
-    max_retries=0,
-)
+client = None
+_text_client = None
+dashscope_client = None
+_CLIENT_GENERATION = 0
 
 PROMPT_ID = config.PROMPT_ID
 IMAGE_PROMPT_ID = config.IMAGE_PROMPT_ID
+
+
+def refresh_clients() -> None:
+    """Rebuild OpenAI clients from the current config module values."""
+    global client, _text_client, dashscope_client, _CLIENT_GENERATION
+    client = OpenAI(
+        api_key=config.SILICONFLOW_API_KEY or "not-configured",
+        base_url=config.SILICONFLOW_BASE_URL,
+        timeout=60.0,
+        max_retries=0,
+    )
+    _text_client = client.with_options(max_retries=0)
+    dashscope_client = OpenAI(
+        api_key=config.DASHSCOPE_API_KEY or "not-configured",
+        base_url=config.DASHSCOPE_BASE_URL,
+        timeout=60.0,
+        max_retries=0,
+    )
+    _CLIENT_GENERATION += 1
+
+
+refresh_clients()
 _TEXT_REQUEST_TIMEOUT_SECONDS = 30.0
 _TEXT_REQUEST_RETRIES = 3
 _TEXT_RETRY_BASE_SECONDS = 2.0
@@ -228,13 +237,14 @@ def classify_message(message: str, context: list[ContextTurn] | None = None) -> 
         return "SAFE"
 
     context_count = len(context or [])
+    prompt_id = config.PROMPT_ID
     classifier = (config.TEXT_CLASSIFIER or "jev_cascade").strip().lower()
     if classifier == "jev_cascade" and (config.AI_GATEWAY_API_KEY or "").strip():
         jev_verdict = classify_with_jev(normalized, context)
         if jev_verdict in {"BAN", "SAFE"}:
             logging.info(
                 "classify_message provider=jev prompt=%s context=%s verdict=%s",
-                PROMPT_ID,
+                prompt_id,
                 context_count,
                 jev_verdict,
             )
@@ -245,7 +255,7 @@ def classify_message(message: str, context: list[ContextTurn] | None = None) -> 
 
     try:
         examples = get_similar_examples(normalized)
-        system_prompt = render_prompt(PROMPT_ID, examples)
+        system_prompt = render_prompt(prompt_id, examples)
         user_content = format_text_classification_prompt(normalized, context)
 
         model = config.SILICONFLOW_MODEL
@@ -304,7 +314,7 @@ def classify_message(message: str, context: list[ContextTurn] | None = None) -> 
         logging.info(
             "classify_message provider=siliconflow prompt=%s model=%s "
             "attempt=%s/%s context=%s raw=%r reasoning_tail=%r verdict=%s",
-            PROMPT_ID,
+            prompt_id,
             model,
             attempt,
             total_attempts,
@@ -338,7 +348,8 @@ def classify_image(image_bytes: bytes) -> str:
     try:
         data_url = _image_to_data_url(image_bytes)
         # Image moderation has no text query for RAG and uses its own prompt version.
-        system_prompt = render_prompt(IMAGE_PROMPT_ID, "")
+        image_prompt_id = config.IMAGE_PROMPT_ID
+        system_prompt = render_prompt(image_prompt_id, "")
         vision_model = config.DASHSCOPE_VISION_MODEL
         create_kwargs = {
             "model": vision_model,
@@ -378,7 +389,7 @@ def classify_image(image_bytes: bytes) -> str:
         logging.info(
             "classify_image prompt=%s provider=%s model=%s raw=%r "
             "reasoning_tail=%r verdict=%s",
-            IMAGE_PROMPT_ID,
+            image_prompt_id,
             "dashscope",
             vision_model,
             content[:80],

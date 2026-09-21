@@ -210,7 +210,7 @@ jobs:
                 --restart unless-stopped \
                 -e TOKENIZERS_PARALLELISM=false \
                 -e HF_HUB_DISABLE_IMPLICIT_TOKEN=1 \
-                -v "${CONFIG_FILE}:/app/config.yaml:ro" \
+                -v "${CONFIG_FILE}:/app/config.yaml" \
                 -v "${VOLUME_NAME}:/app/data" \
                 -p 127.0.0.1:8000:8000 \
                 -p 127.0.0.1:8001:8001 \

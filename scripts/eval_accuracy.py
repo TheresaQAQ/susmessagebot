@@ -451,6 +451,7 @@ def main() -> None:
         raise SystemExit(f"Unknown prompt version: {prompt_id}. Available: {list_prompt_ids()}")
 
     run = args.run if args.run > 0 else next_run_number(prompt_id)
+    config.PROMPT_ID = prompt_id
     moderator.PROMPT_ID = prompt_id
 
     model = args.model or config.SILICONFLOW_MODEL
