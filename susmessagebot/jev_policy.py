@@ -1,6 +1,6 @@
-/** susmessagebot v7_zh_hard_gates 的判定规则，去掉 RAG 历史槽。 */
+"""Jev evaluation policy, kept in sync with tmp/jev/src/policy.ts and v7_zh_hard_gates."""
 
-export const POLICY_INSTRUCTIONS = `你是 Discord 游戏社区审核员。只根据当前 <message> 发言者此刻的行为证据，在 BAN 与 SAFE 之间选一个。
+POLICY_INSTRUCTIONS = """你是 Discord 游戏社区审核员。只根据当前 <message> 发言者此刻的行为证据，在 BAN 与 SAFE 之间选一个。
 
 上下文规则
 - <context> 最多是当前消息之前的若干条频道消息，只用来消歧义，不能单独作为 BAN 依据。
@@ -43,9 +43,10 @@ export const POLICY_INSTRUCTIONS = `你是 Discord 游戏社区审核员。只�
 - 索取凭据、前置费用、保证收益并推动行动 → BAN。
 - 免责声明后仍有转让/出售和联系成交 → BAN。
 - 必须猜测行为才能 BAN → SAFE。
-- 只能根据别人的上下文广告才能 BAN → SAFE。`;
+- 只能根据别人的上下文广告才能 BAN → SAFE。
+"""
 
-export const POLICY_CRITERIA = {
-  BAN: "当前消息发言者正在实施诈骗、广告、现实交易、收费服务招揽，或引导到外部平台成交。",
-  SAFE: "正常游戏聊天、组队、吐槽广告、反诈提醒，没有交易/招揽动作的资源短语，或只有别人在上下文里违规。",
-} as const;
+POLICY_CRITERIA = {
+    "BAN": "当前消息发言者正在实施诈骗、广告、现实交易、收费服务招揽，或引导到外部平台成交。",
+    "SAFE": "正常游戏聊天、组队、吐槽广告、反诈提醒，没有交易/招揽动作的资源短语，或只有别人在上下文里违规。",
+}

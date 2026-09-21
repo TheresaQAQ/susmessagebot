@@ -15,8 +15,10 @@ from .config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
 )
+from .jev_client import classify_with_jev
 from .llm_utils import should_disable_thinking
 from .prompt_loader import DEFAULT_PROMPT_ID, render_prompt
+from .text_context import ContextTurn, format_text_classification_prompt
 from .utils import normalize_text
 from .vector_store import get_similar_examples
 
@@ -215,26 +217,44 @@ def _image_to_data_url(image_bytes: bytes) -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
-def classify_message(message: str) -> str:
+def classify_message(message: str, context: list[ContextTurn] | None = None) -> str:
     """
     Classifies a Discord message as SAFE, BAN, or REVIEW.
 
     REVIEW means classification failed and the message requires manual review.
+    Optional context is prior channel turns; None or [] is single-message mode.
     """
     normalized = normalize_text(message)
     if not normalized:
         return "SAFE"
 
+    context_count = len(context or [])
+    classifier = (config.TEXT_CLASSIFIER or "jev_cascade").strip().lower()
+    if classifier == "jev_cascade" and (config.AI_GATEWAY_API_KEY or "").strip():
+        jev_verdict = classify_with_jev(normalized, context)
+        if jev_verdict in {"BAN", "SAFE"}:
+            logging.info(
+                "classify_message provider=jev prompt=%s context=%s verdict=%s",
+                PROMPT_ID,
+                context_count,
+                jev_verdict,
+            )
+            return jev_verdict
+        logging.warning(
+            "Jev unavailable or inconclusive, falling back to SiliconFlow"
+        )
+
     try:
         examples = get_similar_examples(normalized)
         system_prompt = render_prompt(PROMPT_ID, examples)
+        user_content = format_text_classification_prompt(normalized, context)
 
         model = config.SILICONFLOW_MODEL
         create_kwargs = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"<message>{normalized}</message>"},
+                {"role": "user", "content": user_content},
             ],
             "max_tokens": 64,
             "temperature": 0,
@@ -283,12 +303,13 @@ def classify_message(message: str) -> str:
             break
 
         logging.info(
-            "classify_message prompt=%s model=%s attempt=%s/%s raw=%r "
-            "reasoning_tail=%r verdict=%s",
+            "classify_message provider=siliconflow prompt=%s model=%s "
+            "attempt=%s/%s context=%s raw=%r reasoning_tail=%r verdict=%s",
             PROMPT_ID,
             model,
             attempt,
             total_attempts,
+            context_count,
             content[:80],
             str(reasoning)[-120:],
             result,

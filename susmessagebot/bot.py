@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from .moderator import classify_message
 from .image_moderator import classify_image
+from .text_context import ContextTurn
 from .url_moderator import URL_PATTERN, analyze_urls, load_blocklist
 from .config import (
     DISCORD_BOT_TOKEN,
@@ -382,7 +383,13 @@ async def on_message(message: discord.Message):
                 review_reason = "Image moderation unavailable"
 
     if text:
-        text_result = await loop.run_in_executor(None, classify_message, text)
+        context = await _recent_text_context(message, limit=5)
+        text_result = await loop.run_in_executor(
+            None,
+            classify_message,
+            text,
+            context,
+        )
         url_result = await loop.run_in_executor(None, analyze_urls, text)
         if text_result == "BAN" or url_result == "BAN":
             final = "BAN"
@@ -399,11 +406,13 @@ async def on_message(message: discord.Message):
                     else:
                         review_reason = "URL moderation unavailable"
         logging.info(
-            "discord classify user=%s text=%r text_result=%s url_result=%s final=%s",
+            "discord classify user=%s text=%r text_result=%s url_result=%s "
+            "context=%s final=%s",
             message.author.id,
             text[:120],
             text_result,
             url_result,
+            len(context),
             final,
         )
     elif not evidence_images and final == "SAFE":
@@ -480,6 +489,52 @@ def _discord_media_token_counts(text: str) -> tuple[int, int]:
 def _moderation_text(message: discord.Message) -> str:
     """Return the user-authored text that should enter moderation."""
     return _strip_discord_media_text(message.content or "")
+
+
+def _context_author_name(author) -> str:
+    if author is None:
+        return "unknown"
+    return (
+        getattr(author, "display_name", None)
+        or getattr(author, "name", None)
+        or "unknown"
+    )
+
+
+async def _recent_text_context(
+    message: discord.Message,
+    limit: int = 5,
+) -> list[ContextTurn]:
+    """Load up to `limit` prior text turns. Empty/media messages do not fill slots."""
+    history_fn = getattr(getattr(message, "channel", None), "history", None)
+    if not callable(history_fn):
+        return []
+    try:
+        collected: list[ContextTurn] = []
+        async for prior in history_fn(before=message, limit=limit):
+            text = _moderation_text(prior)
+            if not text:
+                continue
+            author = getattr(prior, "author", None)
+            collected.append(
+                ContextTurn(
+                    author=_context_author_name(author),
+                    user_id=int(getattr(author, "id", 0) or 0),
+                    text=text,
+                )
+            )
+        collected.reverse()
+        return collected
+    except Exception as e:
+        logging.warning(
+            "Failed to fetch text classification context guild=%s channel=%s "
+            "message=%s: %s",
+            getattr(getattr(message, "guild", None), "id", None),
+            getattr(getattr(message, "channel", None), "id", None),
+            getattr(message, "id", None),
+            e,
+        )
+        return []
 
 
 async def _admin_members(guild: discord.Guild) -> list[discord.Member]:

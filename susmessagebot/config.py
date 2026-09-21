@@ -29,6 +29,15 @@ DASHSCOPE_VISION_MODEL = os.getenv(
     "DASHSCOPE_VISION_MODEL",
     "qwen3-vl-flash",
 )
+# Vercel AI Gateway / Jev text classifier. Empty key skips Jev.
+AI_GATEWAY_API_KEY = os.getenv("AI_GATEWAY_API_KEY", "")
+AI_GATEWAY_BASE_URL = os.getenv(
+    "AI_GATEWAY_BASE_URL",
+    "https://ai-gateway.vercel.sh/v1",
+)
+JEV_MODEL = os.getenv("JEV_MODEL", "typesafe-ai/jev")
+# jev_cascade: Jev -> SiliconFlow -> DashScope. siliconflow: skip Jev.
+TEXT_CLASSIFIER = os.getenv("TEXT_CLASSIFIER", "jev_cascade")
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 # Discord user ID shown in ban DMs for unban appeals (add this user to send feedback).

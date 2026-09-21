@@ -18,7 +18,8 @@ from openai import (
 
 from scripts import eval_accuracy
 from susmessagebot import bot as bot_discord
-from susmessagebot import github_sync, moderator, seeds, stats, url_moderator, utils
+from susmessagebot import github_sync, jev_client, moderator, seeds, stats, url_moderator, utils
+from susmessagebot.text_context import ContextTurn, format_text_classification_prompt
 from susmessagebot.llm_utils import should_disable_thinking
 from susmessagebot.strike_tracker import StrikeTracker, ban_notice_text
 from susmessagebot import vector_store
@@ -157,6 +158,7 @@ class TextNormalizationTests(unittest.TestCase):
         self.assertIn("SIP", utils.normalize_text(fancy))
         self.assertEqual(utils.normalize_text("a\u200bb"), "ab")
 
+    @patch.object(moderator.config, "AI_GATEWAY_API_KEY", "")
     @patch.object(
         moderator._text_client.chat.completions,
         "create",
@@ -268,9 +270,15 @@ class ClassifierFailureRegressionTests(unittest.TestCase):
             "susmessagebot.moderator.config.DASHSCOPE_API_KEY",
             "",
         )
+        self.jev_key = patch(
+            "susmessagebot.moderator.config.AI_GATEWAY_API_KEY",
+            "",
+        )
         self.dashscope_key.start()
+        self.jev_key.start()
 
     def tearDown(self):
+        self.jev_key.stop()
         self.dashscope_key.stop()
 
     @patch.object(
@@ -516,6 +524,237 @@ class ClassifierFailureRegressionTests(unittest.TestCase):
                 eval_accuracy.classify_with_retry("hello")
 
         classify.assert_called_once_with("hello")
+
+
+class TextContextFormatTests(unittest.TestCase):
+    def test_format_is_oldest_first_and_skips_empty_context(self):
+        rendered = format_text_classification_prompt(
+            "稳定代练全服可接，上分包月私我",
+            [
+                ContextTurn(author="Alice", user_id=111, text="今晚开荒缺治疗"),
+                ContextTurn(author="Bob", user_id=222, text="我来"),
+            ],
+        )
+        self.assertIn("[1] Alice (`111`): 今晚开荒缺治疗", rendered)
+        self.assertIn("[2] Bob (`222`): 我来", rendered)
+        self.assertLess(rendered.index("[1]"), rendered.index("[2]"))
+        self.assertIn("<message>", rendered)
+        self.assertIn("稳定代练全服可接，上分包月私我", rendered)
+
+    def test_empty_context_matches_single_message_shape(self):
+        with_none = format_text_classification_prompt("hello")
+        with_empty = format_text_classification_prompt("hello", [])
+        self.assertEqual(with_none, with_empty)
+        self.assertNotIn("<context>", with_none)
+        self.assertIn("<message>", with_none)
+        self.assertIn("hello", with_none)
+
+
+class JevCascadeRegressionTests(unittest.TestCase):
+    def _sf_response(self, content):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=content, reasoning=None)
+                )
+            ]
+        )
+
+    def test_jev_ban_or_safe_skips_siliconflow_and_dashscope(self):
+        for verdict in ("BAN", "SAFE"):
+            with self.subTest(verdict=verdict), patch.object(
+                moderator.config, "TEXT_CLASSIFIER", "jev_cascade"
+            ), patch.object(
+                moderator.config, "AI_GATEWAY_API_KEY", "test-key"
+            ), patch.object(
+                moderator, "classify_with_jev", return_value=verdict
+            ) as jev, patch.object(
+                moderator._text_client.chat.completions, "create"
+            ) as siliconflow, patch.object(
+                moderator, "_classify_with_dashscope"
+            ) as dashscope:
+                self.assertEqual(moderator.classify_message("hello"), verdict)
+
+            jev.assert_called_once()
+            siliconflow.assert_not_called()
+            dashscope.assert_not_called()
+
+    def test_jev_timeout_falls_to_siliconflow(self):
+        with patch.object(
+            moderator.config, "TEXT_CLASSIFIER", "jev_cascade"
+        ), patch.object(
+            moderator.config, "AI_GATEWAY_API_KEY", "test-key"
+        ), patch.object(
+            moderator, "classify_with_jev", return_value=None
+        ) as jev, patch.object(
+            moderator, "render_prompt", return_value="rules"
+        ), patch.object(
+            moderator, "get_similar_examples", return_value=""
+        ), patch.object(
+            moderator._text_client.chat.completions,
+            "create",
+            return_value=self._sf_response("SAFE"),
+        ) as siliconflow, patch.object(
+            moderator, "_classify_with_dashscope"
+        ) as dashscope:
+            self.assertEqual(moderator.classify_message("hello"), "SAFE")
+
+        jev.assert_called_once()
+        siliconflow.assert_called_once()
+        dashscope.assert_not_called()
+
+    def test_siliconflow_review_falls_to_dashscope(self):
+        with patch.object(
+            moderator.config, "TEXT_CLASSIFIER", "jev_cascade"
+        ), patch.object(
+            moderator.config, "AI_GATEWAY_API_KEY", "test-key"
+        ), patch.object(
+            moderator.config, "DASHSCOPE_API_KEY", "dash-key"
+        ), patch.object(
+            moderator, "classify_with_jev", return_value=None
+        ), patch.object(
+            moderator, "render_prompt", return_value="rules"
+        ), patch.object(
+            moderator, "get_similar_examples", return_value=""
+        ), patch.object(
+            moderator._text_client.chat.completions,
+            "create",
+            return_value=self._sf_response("not a verdict"),
+        ) as siliconflow, patch.object(
+            moderator, "_classify_with_dashscope", return_value="BAN"
+        ) as dashscope:
+            self.assertEqual(moderator.classify_message("hello"), "BAN")
+
+        siliconflow.assert_called_once()
+        dashscope.assert_called_once()
+
+    def test_siliconflow_mode_does_not_call_jev(self):
+        with patch.object(
+            moderator.config, "TEXT_CLASSIFIER", "siliconflow"
+        ), patch.object(
+            moderator.config, "AI_GATEWAY_API_KEY", "test-key"
+        ), patch.object(
+            moderator, "classify_with_jev", return_value="BAN"
+        ) as jev, patch.object(
+            moderator, "render_prompt", return_value="rules"
+        ), patch.object(
+            moderator, "get_similar_examples", return_value=""
+        ), patch.object(
+            moderator._text_client.chat.completions,
+            "create",
+            return_value=self._sf_response("SAFE"),
+        ):
+            self.assertEqual(moderator.classify_message("hello"), "SAFE")
+
+        jev.assert_not_called()
+
+    def test_siliconflow_user_content_includes_context(self):
+        context = [
+            ContextTurn(author="Alice", user_id=111, text="今晚开荒缺治疗"),
+        ]
+        with patch.object(
+            moderator.config, "TEXT_CLASSIFIER", "siliconflow"
+        ), patch.object(
+            moderator.config, "AI_GATEWAY_API_KEY", ""
+        ), patch.object(
+            moderator, "render_prompt", return_value="rules"
+        ), patch.object(
+            moderator, "get_similar_examples", return_value=""
+        ) as get_examples, patch.object(
+            moderator._text_client.chat.completions,
+            "create",
+            return_value=self._sf_response("SAFE"),
+        ) as create:
+            self.assertEqual(
+                moderator.classify_message("我来", context),
+                "SAFE",
+            )
+
+        get_examples.assert_called_once_with("我来")
+        user_content = create.call_args.kwargs["messages"][1]["content"]
+        self.assertIn("<context>", user_content)
+        self.assertIn("Alice (`111`): 今晚开荒缺治疗", user_content)
+        self.assertIn("<message>", user_content)
+        self.assertIn("我来", user_content)
+
+    def test_classify_image_does_not_call_jev(self):
+        with patch.object(moderator.config, "DASHSCOPE_API_KEY", "dash-key"), patch.object(
+            moderator, "classify_with_jev", return_value="BAN"
+        ) as jev, patch.object(
+            moderator, "_image_to_data_url", return_value="data:image/jpeg;base64,xx"
+        ), patch.object(
+            moderator, "render_prompt", return_value="rules"
+        ), patch.object(
+            moderator.dashscope_client.chat.completions,
+            "create",
+            return_value=self._sf_response("SAFE"),
+        ):
+            self.assertEqual(moderator.classify_image(b"image"), "SAFE")
+
+        jev.assert_not_called()
+
+
+class JevClientTests(unittest.TestCase):
+    def test_missing_key_returns_none_without_http(self):
+        with patch.object(jev_client.config, "AI_GATEWAY_API_KEY", ""), patch.object(
+            jev_client.requests, "post"
+        ) as post:
+            self.assertIsNone(jev_client.classify_with_jev("hello"))
+        post.assert_not_called()
+
+    def test_invalid_choice_and_http_error_return_none(self):
+        response = SimpleNamespace(ok=True, json=lambda: {"answers": {"verdict": {"choice": "MAYBE"}}})
+        with patch.object(jev_client.config, "AI_GATEWAY_API_KEY", "key"), patch.object(
+            jev_client.requests, "post", return_value=response
+        ):
+            self.assertIsNone(jev_client.classify_with_jev("hello"))
+
+        failed = SimpleNamespace(ok=False, status_code=503, text="busy")
+        with patch.object(jev_client.config, "AI_GATEWAY_API_KEY", "key"), patch.object(
+            jev_client.requests, "post", return_value=failed
+        ):
+            self.assertIsNone(jev_client.classify_with_jev("hello"))
+
+    def test_timeout_returns_none(self):
+        with patch.object(jev_client.config, "AI_GATEWAY_API_KEY", "key"), patch.object(
+            jev_client.requests, "post", side_effect=TimeoutError("slow")
+        ):
+            self.assertIsNone(jev_client.classify_with_jev("hello"))
+
+    def test_posts_evaluate_payload_with_context(self):
+        response = SimpleNamespace(
+            ok=True,
+            json=lambda: {"answers": {"verdict": {"choice": "BAN"}}},
+        )
+        with patch.object(jev_client.config, "AI_GATEWAY_API_KEY", "key"), patch.object(
+            jev_client.config, "JEV_MODEL", "typesafe-ai/jev"
+        ), patch.object(
+            jev_client.config, "AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1"
+        ), patch.object(
+            jev_client.requests, "post", return_value=response
+        ) as post:
+            self.assertEqual(
+                jev_client.classify_with_jev(
+                    "私我",
+                    [ContextTurn(author="Eve", user_id=333, text="代练")],
+                ),
+                "BAN",
+            )
+
+        post.assert_called_once()
+        self.assertEqual(
+            post.call_args.args[0],
+            "https://ai-gateway.vercel.sh/v1/evaluate",
+        )
+        self.assertEqual(post.call_args.kwargs["timeout"], 10.0)
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "typesafe-ai/jev")
+        self.assertEqual(payload["state"]["message"], "私我")
+        self.assertEqual(
+            payload["state"]["context"],
+            [{"author": "Eve", "user_id": 333, "text": "代练"}],
+        )
+        self.assertEqual(payload["questions"]["verdict"]["type"], "choice")
 
 
 class EvaluationResumeRegressionTests(unittest.TestCase):
@@ -877,7 +1116,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_discord.on_message(message)
 
-        classify_text.assert_called_once_with("cheap accounts for sale")
+        classify_text.assert_called_once_with("cheap accounts for sale", [])
         classify_urls.assert_called_once_with("cheap accounts for sale")
         self.assertTrue(
             any(
@@ -916,7 +1155,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_discord.on_message(message)
 
-        classify_text.assert_called_once_with(other_url)
+        classify_text.assert_called_once_with(other_url, [])
         classify_urls.assert_called_once_with(other_url)
         request_review.assert_awaited_once_with(
             message,
@@ -967,7 +1206,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_discord.on_message(message)
 
-        classify_text.assert_called_once_with("cheap accounts for sale")
+        classify_text.assert_called_once_with("cheap accounts for sale", [])
         classify_urls.assert_called_once_with("cheap accounts for sale")
         ban_user.assert_awaited_once_with(
             message,
@@ -1024,7 +1263,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_discord.on_message(message)
 
-        classify_text.assert_called_once_with("cheap accounts for sale")
+        classify_text.assert_called_once_with("cheap accounts for sale", [])
         classify_urls.assert_called_once_with("cheap accounts for sale")
         ban_user.assert_awaited_once_with(
             message,
@@ -1128,7 +1367,7 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_discord.on_message(message)
 
-        classify_text.assert_called_once_with(url)
+        classify_text.assert_called_once_with(url, [])
         classify_urls.assert_called_once_with(url)
         ban_user.assert_awaited_once_with(
             message,
@@ -1304,6 +1543,130 @@ class HandlerFailureRegressionTests(unittest.IsolatedAsyncioTestCase):
             await bot_discord.on_message(message)
 
         ban_user.assert_awaited_once()
+
+    def _history_author(self, name, user_id):
+        return SimpleNamespace(display_name=name, name=name, id=user_id)
+
+    def _history_message(self, content, *, name="Alice", user_id=111):
+        return SimpleNamespace(
+            author=self._history_author(name, user_id),
+            content=content,
+            attachments=[],
+            stickers=[],
+        )
+
+    async def test_recent_context_is_oldest_first_and_skips_empty(self):
+        newest = self._history_message("我来", name="Bob", user_id=222)
+        media = self._history_message("https://klipy.com/gifs/reaction")
+        oldest = self._history_message("今晚开荒缺治疗", name="Alice", user_id=111)
+
+        async def history(*, before=None, limit=5):
+            for item in (newest, media, oldest):
+                yield item
+
+        current = self._discord_message(content="开了")
+        current.channel.history = history
+        context = await bot_discord._recent_text_context(current, limit=5)
+
+        self.assertEqual(
+            context,
+            [
+                ContextTurn(author="Alice", user_id=111, text="今晚开荒缺治疗"),
+                ContextTurn(author="Bob", user_id=222, text="我来"),
+            ],
+        )
+
+    async def test_recent_context_uses_partial_history(self):
+        only = self._history_message("就这一条")
+
+        async def history(*, before=None, limit=5):
+            yield only
+
+        current = self._discord_message(content="嗯")
+        current.channel.history = history
+        context = await bot_discord._recent_text_context(current, limit=5)
+        self.assertEqual(
+            context,
+            [ContextTurn(author="Alice", user_id=111, text="就这一条")],
+        )
+
+    async def test_history_failure_returns_empty_and_still_classifies(self):
+        def history(*, before=None, limit=5):
+            raise RuntimeError("missing Access")
+
+        message = self._discord_message(content="cheap accounts for sale")
+        message.channel.history = history
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_message",
+                return_value="SAFE",
+            ) as classify_text,
+            patch.object(
+                bot_discord,
+                "analyze_urls",
+                return_value="SAFE",
+            ) as classify_urls,
+            patch.object(bot_discord, "_ban_user", AsyncMock()),
+            patch.object(bot_discord, "_request_manual_review", AsyncMock()),
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_called_once_with("cheap accounts for sale", [])
+        classify_urls.assert_called_once_with("cheap accounts for sale")
+
+    async def test_on_message_passes_context_and_current_text_urls(self):
+        prior = self._history_message(
+            "今晚开荒 https://old.example/ad",
+            name="Alice",
+            user_id=111,
+        )
+
+        async def history(*, before=None, limit=5):
+            yield prior
+
+        message = self._discord_message(content="我来 https://unknown.example/x")
+        message.channel.history = history
+
+        with (
+            patch.object(
+                bot_discord,
+                "classify_message",
+                return_value="SAFE",
+            ) as classify_text,
+            patch.object(
+                bot_discord,
+                "analyze_urls",
+                return_value="REVIEW",
+            ) as classify_urls,
+            patch.object(bot_discord, "_ban_user", AsyncMock()),
+            patch.object(
+                bot_discord,
+                "_request_manual_review",
+                AsyncMock(),
+            ) as request_review,
+        ):
+            await bot_discord.on_message(message)
+
+        classify_text.assert_called_once()
+        text, context = classify_text.call_args.args
+        self.assertEqual(text, "我来 https://unknown.example/x")
+        self.assertEqual(
+            context,
+            [
+                ContextTurn(
+                    author="Alice",
+                    user_id=111,
+                    text="今晚开荒 https://old.example/ad",
+                )
+            ],
+        )
+        classify_urls.assert_called_once_with("我来 https://unknown.example/x")
+        request_review.assert_awaited_once_with(
+            message,
+            reason="URL moderation unavailable",
+        )
 
 
 class DiscordHealthRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -2944,6 +3307,7 @@ class ThinkingFlagTests(unittest.TestCase):
 
 
 class ModelOverrideTests(unittest.TestCase):
+    @patch.object(moderator.config, "AI_GATEWAY_API_KEY", "")
     @patch("susmessagebot.moderator.get_similar_examples", return_value="")
     @patch("susmessagebot.moderator.render_prompt", return_value="rules")
     @patch("susmessagebot.moderator._text_client.chat.completions.create")
