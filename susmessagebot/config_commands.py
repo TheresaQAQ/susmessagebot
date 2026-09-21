@@ -26,7 +26,11 @@ config_group = app_commands.Group(
     name="config",
     description="查看或热更新机器人配置",
     default_permissions=discord.Permissions(administrator=True),
-    guild_only=True,
+    allowed_contexts=app_commands.AppCommandContext(
+        guild=False,
+        dm_channel=True,
+        private_channel=True,
+    ),
 )
 
 
@@ -97,17 +101,51 @@ def format_config_show() -> str:
     return "\n".join(lines)
 
 
+async def _user_is_shared_guild_admin(
+    client: discord.Client,
+    user_id: int,
+) -> bool:
+    """True if the user owns or has Administrator in any mutual guild."""
+    for guild in getattr(client, "guilds", []):
+        if getattr(guild, "owner_id", None) == user_id:
+            return True
+        member = None
+        get_member = getattr(guild, "get_member", None)
+        if callable(get_member):
+            member = get_member(user_id)
+        if member is None:
+            fetch_member = getattr(guild, "fetch_member", None)
+            if callable(fetch_member):
+                try:
+                    member = await fetch_member(user_id)
+                except Exception:
+                    continue
+        if member is None:
+            continue
+        permissions = getattr(member, "guild_permissions", None)
+        if getattr(permissions, "administrator", False):
+            return True
+    return False
+
+
 async def _require_config_admin(interaction: discord.Interaction) -> bool:
-    if interaction.guild_id is None:
+    if interaction.guild_id is not None:
         await interaction.response.send_message(
-            "只能在服务器里使用此命令。",
+            "请私聊机器人使用此命令。",
             ephemeral=True,
         )
         return False
-    from .bot import _require_interaction_admin
+    from .bot import _is_application_owner
 
-    guild = await _require_interaction_admin(interaction, interaction.guild_id)
-    return guild is not None
+    if _is_application_owner(interaction.user.id):
+        return True
+    if await _user_is_shared_guild_admin(interaction.client, interaction.user.id):
+        return True
+    await interaction.response.send_message(
+        "仅管理员可操作。",
+        ephemeral=True,
+    )
+    return False
 
 
 @config_group.command(name="show", description="查看当前可热更新配置")

@@ -1940,6 +1940,27 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
         guild.fetch_member.assert_awaited_once_with(10)
         interaction.response.send_message.assert_not_awaited()
 
+    async def test_application_owner_can_operate_review_without_guild_admin(self):
+        previous = bot_discord._application_owner_users
+        bot_discord._application_owner_users = [SimpleNamespace(id=88, bot=False)]
+        try:
+            guild = SimpleNamespace(
+                owner_id=99,
+                get_member=MagicMock(return_value=None),
+                fetch_member=AsyncMock(side_effect=RuntimeError("not in guild")),
+            )
+            interaction = SimpleNamespace(
+                client=SimpleNamespace(get_guild=MagicMock(return_value=guild)),
+                user=SimpleNamespace(id=88),
+                response=SimpleNamespace(send_message=AsyncMock()),
+            )
+            result = await bot_discord._require_interaction_admin(interaction, 1)
+        finally:
+            bot_discord._application_owner_users = previous
+
+        self.assertIs(result, guild)
+        interaction.response.send_message.assert_not_awaited()
+
     def test_review_views_use_persistent_components(self):
         hitl = bot_discord.HITLView(
             guild_id=1,
@@ -1977,8 +1998,10 @@ class DiscordOperationalRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Report to SusMessageBot", command_names)
         self.assertIn("config", command_names)
         config_cmd = bot_discord.client.tree.get_command("config")
-        self.assertTrue(config_cmd.guild_only)
+        self.assertFalse(config_cmd.guild_only)
         self.assertTrue(config_cmd.default_permissions.administrator)
+        self.assertFalse(config_cmd.allowed_contexts.guild)
+        self.assertTrue(config_cmd.allowed_contexts.dm_channel)
 
 
 class DiscordStrikeReviewRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -2155,6 +2178,39 @@ class ReviewDecisionAtomicityTests(unittest.IsolatedAsyncioTestCase):
             "[image]",
             "Suspicious image",
         )
+
+    async def test_review_dm_includes_application_owner(self):
+        admin = SimpleNamespace(id=10, send=AsyncMock())
+        owner = SimpleNamespace(id=88, send=AsyncMock())
+        author = SimpleNamespace(id=7)
+        guild = SimpleNamespace(id=1, name="Test Guild")
+        previous = bot_discord._application_owner_users
+        bot_discord._application_owner_users = [owner]
+        try:
+            with (
+                patch.object(
+                    bot_discord,
+                    "_admin_members",
+                    AsyncMock(return_value=[admin]),
+                ),
+                patch.object(bot_discord, "store_review_evidence"),
+            ):
+                notified = await bot_discord._dm_admins_review(
+                    guild,
+                    channel_name="ads",
+                    author=author,
+                    content="scam text",
+                    reason="Suspicious message",
+                    message_id=42,
+                    channel_id=9,
+                    removed=False,
+                )
+        finally:
+            bot_discord._application_owner_users = previous
+
+        self.assertEqual(notified, 2)
+        admin.send.assert_awaited_once()
+        owner.send.assert_awaited_once()
 
     async def test_review_dm_reference_is_persisted_after_send(self):
         old_db_path = stats.DB_PATH
@@ -3856,19 +3912,22 @@ class ConfigHotReloadTests(unittest.TestCase):
 
 
 class ConfigCommandTests(unittest.IsolatedAsyncioTestCase):
-    def _interaction(self, *, admin=True, guild_id=1):
+    def _interaction(self, *, admin=True, in_guild=False):
         member = SimpleNamespace(
             id=11 if admin else 99,
             guild_permissions=SimpleNamespace(administrator=admin),
         )
         guild = SimpleNamespace(
             owner_id=11,
-            get_member=MagicMock(return_value=member),
+            get_member=MagicMock(return_value=member if admin else None),
             fetch_member=AsyncMock(return_value=member),
         )
         return SimpleNamespace(
-            guild_id=guild_id,
-            client=SimpleNamespace(get_guild=MagicMock(return_value=guild)),
+            guild_id=1 if in_guild else None,
+            client=SimpleNamespace(
+                get_guild=MagicMock(return_value=guild),
+                guilds=[guild],
+            ),
             user=SimpleNamespace(id=member.id),
             response=SimpleNamespace(send_message=AsyncMock()),
             namespace=SimpleNamespace(key=""),
@@ -3908,13 +3967,44 @@ class ConfigCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs.get("ephemeral"))
         self.assertEqual(config.DISCORD_BOT_TOKEN, previous)
 
-    async def test_dm_is_rejected(self):
+    async def test_guild_is_rejected(self):
+        from susmessagebot import config
         from susmessagebot import config_commands
 
-        interaction = self._interaction(guild_id=None)
+        interaction = self._interaction(in_guild=True)
+        previous = config.SILICONFLOW_MODEL
+        await config_commands.config_set.callback(
+            interaction,
+            "siliconflow.model",
+            "should-not-apply",
+        )
+        args, kwargs = interaction.response.send_message.await_args
+        self.assertIn("私聊", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
+        self.assertEqual(config.SILICONFLOW_MODEL, previous)
+
+    async def test_dm_admin_can_show(self):
+        from susmessagebot import config_commands
+
+        interaction = self._interaction()
         await config_commands.config_show.callback(interaction)
         args, kwargs = interaction.response.send_message.await_args
-        self.assertIn("服务器", args[0])
+        self.assertIn("当前配置", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
+
+    async def test_dm_application_owner_can_show_without_guild_admin(self):
+        from susmessagebot import config_commands
+
+        previous = bot_discord._application_owner_users
+        bot_discord._application_owner_users = [SimpleNamespace(id=88, bot=False)]
+        try:
+            interaction = self._interaction(admin=False)
+            interaction.user = SimpleNamespace(id=88)
+            await config_commands.config_show.callback(interaction)
+        finally:
+            bot_discord._application_owner_users = previous
+        args, kwargs = interaction.response.send_message.await_args
+        self.assertIn("当前配置", args[0])
         self.assertTrue(kwargs.get("ephemeral"))
 
 

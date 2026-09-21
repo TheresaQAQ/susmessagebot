@@ -64,6 +64,8 @@ intents.members = True
 
 # Set True after Discord gateway ready; /health returns 503 until then.
 _bot_ready = False
+# Discord application owner (and team members). Filled in on_ready.
+_application_owner_users: list[discord.User] = []
 _BLOCKLIST_REFRESH_SECONDS = 6 * 60 * 60
 _blocklist_refresh_task: asyncio.Task | None = None
 _REQUIRED_GUILD_PERMISSIONS = (
@@ -259,6 +261,7 @@ async def on_ready():
         if not permission_ok:
             permission_failures += 1
     _refresh_guild_metrics()
+    await _refresh_application_owners()
     _bot_ready = True
     logging.info(
         "Startup permission check complete: %s/%s guild(s) need attention",
@@ -540,6 +543,76 @@ async def _recent_text_context(
         return []
 
 
+async def _refresh_application_owners() -> list[discord.User]:
+    """Cache the Discord application owner and team members."""
+    global _application_owner_users
+    try:
+        app = await client.application_info()
+    except Exception as e:
+        logging.warning("Could not load Discord application owner: %s", e)
+        return list(_application_owner_users)
+
+    users: list[discord.User] = []
+    seen: set[int] = set()
+    candidates: list[discord.abc.User] = []
+    if getattr(app, "team", None) is not None:
+        for member in app.team.members:
+            user = getattr(member, "user", None)
+            if user is None:
+                try:
+                    user = await client.fetch_user(member.id)
+                except Exception as e:
+                    logging.warning(
+                        "Could not fetch application team member %s: %s",
+                        getattr(member, "id", "?"),
+                        e,
+                    )
+                    continue
+            candidates.append(user)
+    elif getattr(app, "owner", None) is not None:
+        candidates.append(app.owner)
+
+    for user in candidates:
+        user_id = getattr(user, "id", None)
+        if not isinstance(user_id, int) or user_id in seen or getattr(user, "bot", False):
+            continue
+        seen.add(user_id)
+        users.append(user)
+
+    _application_owner_users = users
+    if users:
+        logging.info(
+            "Review DMs will also go to application owner(s): %s",
+            ", ".join(f"{user} ({user.id})" for user in users),
+        )
+    return list(users)
+
+
+def _application_owners() -> list[discord.User]:
+    return list(_application_owner_users)
+
+
+def _is_application_owner(user_id: int) -> bool:
+    return any(owner.id == user_id for owner in _application_owner_users)
+
+
+async def _review_recipients(guild: discord.Guild) -> list[discord.abc.User]:
+    """Guild admins plus the Discord application owner, de-duplicated."""
+    seen: set[int] = set()
+    recipients: list[discord.abc.User] = []
+    for admin in await _admin_members(guild):
+        if admin.id in seen:
+            continue
+        seen.add(admin.id)
+        recipients.append(admin)
+    for owner in _application_owners():
+        if owner.id in seen:
+            continue
+        seen.add(owner.id)
+        recipients.append(owner)
+    return recipients
+
+
 async def _admin_members(guild: discord.Guild) -> list[discord.Member]:
     """Guild owner + members with Administrator (excludes bots)."""
     if not getattr(guild, "chunked", True):
@@ -728,7 +801,11 @@ async def _dm_admins_review(
     removed: bool = True,
     status: str | None = None,
 ) -> int:
-    """Send full content + Ban/False Alarm buttons to each admin via DM. Returns how many DMs succeeded."""
+    """Send full content + Ban/False Alarm buttons to reviewers via DM.
+
+    Recipients are guild admins plus the Discord application owner.
+    Returns how many DMs succeeded.
+    """
     store_review_evidence(guild.id, message_id, author.id, content, reason)
     if status is None:
         status = (
@@ -742,7 +819,7 @@ async def _dm_admins_review(
         f"{_review_content_block(content)}"
     )
     notified = 0
-    for admin in await _admin_members(guild):
+    for admin in await _review_recipients(guild):
         try:
             view = HITLView(
                 guild_id=guild.id,
@@ -1193,16 +1270,18 @@ async def _require_interaction_admin(
             member = await guild.fetch_member(interaction.user.id)
         except Exception as e:
             logging.warning(f"Could not fetch interaction member {interaction.user.id}: {e}")
-    if member is None or not (
+    if member is not None and (
         member.id == guild.owner_id
         or member.guild_permissions.administrator
     ):
-        await interaction.response.send_message(
-            "仅管理员可操作。",
-            ephemeral=True,
-        )
-        return None
-    return guild
+        return guild
+    if _is_application_owner(interaction.user.id):
+        return guild
+    await interaction.response.send_message(
+        "仅管理员可操作。",
+        ephemeral=True,
+    )
+    return None
 
 
 def _interaction_review_text(
